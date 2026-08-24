@@ -58,7 +58,10 @@ type DispatchPhase = 'queued' | 'running' | 'completed' | 'failed';
 type BridgeHealthState = 'checking' | 'connected' | 'pending' | 'offline';
 
 type JobPayload = {
+  id?: string;
   workflow_stage?: string | null;
+  workflow_id?: string | null;
+  started_at?: string | null;
   status?: string;
   error?: string | null;
   report?: {
@@ -100,11 +103,11 @@ const workflowLightLabels: Record<WorkflowLightState, string> = {
 function getWorkflowLight(workflow: WorkflowPayload | null, stage: WorkflowStage): WorkflowLightState {
   const job = workflow?.jobs?.find((item) => item.workflow_stage?.toLowerCase() === stage);
   const status = job?.status?.toLowerCase();
+  if (workflow?.status === 'failed' && workflow.current_stage?.toLowerCase() === stage) return 'red';
   if (status === 'succeeded' || status === 'completed' || status === 'success') return 'green';
   if (status === 'failed' || status === 'cancelled' || status === 'canceled') return 'red';
   if (status === 'queued' || status === 'running') return 'progress';
   if ((workflow?.status === 'queued' || workflow?.status === 'running') && workflow.current_stage?.toLowerCase() === stage) return 'progress';
-  if (workflow?.status === 'failed' && workflow.current_stage?.toLowerCase() === stage) return 'red';
   return 'off';
 }
 
@@ -127,6 +130,7 @@ export default function Home() {
   const [taskText, setTaskText] = useState('修正 Telegram worker 在 job timeout 後沒有清除 lock 的問題。完成後執行 pytest，不要 push。');
   const [dispatchState, setDispatchState] = useState<DispatchState>('idle');
   const [dispatchJob, setDispatchJob] = useState('job-tg01-ready');
+  const [dispatchCode, setDispatchCode] = useState('');
   const [workflowId, setWorkflowId] = useState('');
   const [workflowState, setWorkflowState] = useState<WorkflowPayload | null>(null);
   const [dispatchProgress, setDispatchProgress] = useState<DispatchPhase[]>([]);
@@ -294,7 +298,17 @@ export default function Home() {
         setDispatchState('failed');
         setDispatchProgress(['queued', 'failed']);
         const detail = error instanceof Error ? error.message : '未知錯誤';
-        setDispatchSummary(`無法讀取 workflow 結果：${detail}。請使用 /workflow ${flowId} 查詢。`);
+        const failureMessage = `無法讀取 workflow 結果：${detail}。請使用 /workflow ${flowId} 查詢。`;
+        setWorkflowState((current) => {
+          const stage = workflowStages.some((item) => item.key === current?.current_stage?.toLowerCase())
+            ? current?.current_stage?.toLowerCase() as WorkflowStage
+            : 'gpt';
+          const jobs = current?.jobs?.map((job) => job.workflow_stage?.toLowerCase() === stage
+            ? { ...job, status: 'failed' }
+            : job) ?? [{ workflow_stage: stage, status: 'failed' }];
+          return { ...current, status: 'failed', current_stage: stage, error: failureMessage, jobs };
+        });
+        setDispatchSummary(failureMessage);
         return;
       }
     }
@@ -302,7 +316,17 @@ export default function Home() {
     if (pollingToken.current === token) {
       setDispatchState('failed');
       setDispatchProgress(['queued', 'failed']);
-      setDispatchSummary(`等待 workflow 結果逾時，請使用 /workflow ${flowId} 查詢。`);
+      const failureMessage = `等待 workflow 結果逾時，請使用 /workflow ${flowId} 查詢。`;
+      setWorkflowState((current) => {
+        const stage = workflowStages.some((item) => item.key === current?.current_stage?.toLowerCase())
+          ? current?.current_stage?.toLowerCase() as WorkflowStage
+          : 'gpt';
+        const jobs = current?.jobs?.map((job) => job.workflow_stage?.toLowerCase() === stage
+          ? { ...job, status: 'failed' }
+          : job) ?? [{ workflow_stage: stage, status: 'failed' }];
+        return { ...current, status: 'failed', current_stage: stage, error: failureMessage, jobs };
+      });
+      setDispatchSummary(failureMessage);
     }
   };
 
@@ -314,6 +338,7 @@ export default function Home() {
     setWorkflowId('');
     setWorkflowState(null);
     setErrorCopied(false);
+    setDispatchCode('');
     setDispatchProgress([]);
     setDispatchSummary('');
 
@@ -339,9 +364,25 @@ export default function Home() {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ task: taskText, mode: 'write', provider: 'codex' }),
         });
-        const payload = await response.json() as { ok?: boolean; job?: { id?: string }; workflow?: WorkflowPayload & { id?: string } };
+        const payload = await response.json() as {
+          ok?: boolean;
+          code?: string;
+          message?: string;
+          job?: { id?: string };
+          workflow?: WorkflowPayload & { id?: string };
+          running_jobs?: JobPayload[];
+        };
         if (!response.ok || !payload.ok || !payload.job?.id) {
+          const running = payload.running_jobs?.[0];
           setDispatchState('blocked');
+          setDispatchCode(payload.code || 'BRIDGE_UNAVAILABLE');
+          setDispatchProgress(['queued', 'failed']);
+          if (payload.code === 'CODEX_EXEC_RUNNING' && running?.id) {
+            setDispatchJob(running.id);
+            setDispatchSummary(`${payload.message || '已有 Codex exec 正在執行。'} running job=${running.id}，workflow=${running.workflow_id || 'standalone'}，stage=${running.workflow_stage || 'gpt'}。請先評估目前任務，再重新執行 /gpt。`);
+          } else {
+            setDispatchSummary(payload.message || 'Bridge API 無法派送 workflow。');
+          }
           return;
         }
         setDispatchJob(payload.job.id);
@@ -443,7 +484,7 @@ export default function Home() {
           <div className="console-top"><span className="console-label"><b /> TG 01 / COMMAND CONSOLE</span><span className={`console-mode ${dispatchMode}`}>{dispatchMode === 'test' ? 'TEST MODE' : 'LIVE MODE'}</span></div>
           <form onSubmit={submitTask}>
             <label className="console-label-text" htmlFor="tg-task">COMMAND PAYLOAD <span>/{dispatchFlow === 'loop' ? 'gpt' : 'run'}</span></label>
-            <div className="task-field"><span>/{dispatchFlow === 'loop' ? 'gpt' : 'run'}</span><textarea id="tg-task" value={taskText} onChange={(event) => { setTaskText(event.target.value); setDispatchState('idle'); setWorkflowId(''); setWorkflowState(null); setErrorCopied(false); }} rows={4} aria-describedby="tg-task-help" /></div>
+            <div className="task-field"><span>/{dispatchFlow === 'loop' ? 'gpt' : 'run'}</span><textarea id="tg-task" value={taskText} onChange={(event) => { setTaskText(event.target.value); setDispatchState('idle'); setWorkflowId(''); setWorkflowState(null); setErrorCopied(false); setDispatchCode(''); }} rows={4} aria-describedby="tg-task-help" /></div>
             <p className="console-help" id="tg-task-help">{dispatchFlow === 'loop' ? <>依序排程 <strong>Codex → AGY → Claude</strong>，完成後上傳 redacted GitHub Markdown 報告。</> : <>會送往預設 provider <strong>codex</strong>，並保留 workspace-write / no-push 邊界。</>}</p>
             <div className="console-controls">
               <div className="flow-switch mode-switch" aria-label="工作流程">
@@ -465,7 +506,7 @@ export default function Home() {
             {dispatchState === 'failed' && <><span className="result-icon result-warn">!</span><span><strong>{workflowId ? 'Workflow failed' : 'Codex job failed'}</strong> / 執行失敗</span><code>{workflowId || dispatchJob}</code></>}
             {dispatchState === 'checking' && <><span className="result-icon result-checking">◌</span><span><strong>Checking Telegram Bot</strong> / 正在驗證 Bridge API</span><code>GET /api/tg/health</code></>}
             {dispatchState === 'verified' && <><span className="result-icon result-ok">✓</span><span><strong>Telegram Bot verified</strong> / Codex bridge 尚未設定</span><code>BRIDGE_REQUIRED</code></>}
-            {dispatchState === 'blocked' && <><span className="result-icon result-warn">!</span><span><strong>Live dispatch blocked</strong> / Bridge API 無法連線</span><code>BRIDGE_UNAVAILABLE</code></>}
+            {dispatchState === 'blocked' && <><span className="result-icon result-warn">!</span><span><strong>{dispatchCode === 'CODEX_EXEC_RUNNING' ? 'Codex exec already running' : 'Live dispatch blocked'}</strong> / {dispatchCode === 'CODEX_EXEC_RUNNING' ? '請先評估執行中任務' : 'Bridge API 無法連線'}</span><code>{dispatchCode || 'BRIDGE_UNAVAILABLE'}</code></>}
           </div>
           {dispatchProgress.length > 0 && <div className="dispatch-progress" aria-label="Codex job progress">
             <div className="progress-track">
@@ -482,7 +523,7 @@ export default function Home() {
               <span>PIPELINE LIGHTS / 三燈管制</span>
               <span className="workflow-legend">
                 <span><i className="traffic-key red" />失敗</span>
-                <span><i className="traffic-key yellow" />警告</span>
+                <span><i className="traffic-key progress" />進行中</span>
                 <span><i className="traffic-key green" />通過</span>
               </span>
             </div>
