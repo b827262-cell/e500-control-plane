@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 
 const command = '/run 修正 Telegram worker 的 timeout lock cleanup，完成後執行 pytest，不要 push。';
 
@@ -51,8 +51,17 @@ function Arrow() {
   return <span className="pipeline-arrow" aria-hidden="true">→</span>;
 }
 
-type DispatchState = 'idle' | 'queued' | 'blocked' | 'checking' | 'verified';
+type DispatchState = 'idle' | 'queued' | 'running' | 'completed' | 'failed' | 'blocked' | 'checking' | 'verified';
+type DispatchPhase = 'queued' | 'running' | 'completed' | 'failed';
 type BridgeHealthState = 'checking' | 'connected' | 'pending' | 'offline';
+
+type JobPayload = {
+  status?: string;
+  error?: string | null;
+  report?: {
+    summary?: string;
+  } | null;
+};
 
 export default function Home() {
   const [copied, setCopied] = useState(false);
@@ -60,7 +69,10 @@ export default function Home() {
   const [taskText, setTaskText] = useState('修正 Telegram worker 在 job timeout 後沒有清除 lock 的問題。完成後執行 pytest，不要 push。');
   const [dispatchState, setDispatchState] = useState<DispatchState>('idle');
   const [dispatchJob, setDispatchJob] = useState('job-tg01-ready');
+  const [dispatchProgress, setDispatchProgress] = useState<DispatchPhase[]>([]);
+  const [dispatchSummary, setDispatchSummary] = useState('');
   const [bridgeHealth, setBridgeHealth] = useState<BridgeHealthState>('checking');
+  const pollingToken = useRef(0);
 
   const bridgeLabel = bridgeHealth === 'connected'
     ? 'API linked'
@@ -120,9 +132,66 @@ export default function Home() {
     }
   };
 
+  const pollJob = async (jobId: string, token: number) => {
+    for (let attempt = 0; attempt < 180; attempt += 1) {
+      if (pollingToken.current !== token) return;
+      if (attempt > 0) {
+        await new Promise((resolve) => window.setTimeout(resolve, 2000));
+      }
+
+      try {
+        const response = await fetch(`/api/tg/result/${encodeURIComponent(jobId)}`, { cache: 'no-store' });
+        const payload = await response.json() as { ok?: boolean; job?: JobPayload };
+        if (!response.ok || !payload.ok || !payload.job?.status) throw new Error('job result unavailable');
+        if (pollingToken.current !== token) return;
+
+        if (payload.job.status === 'queued') {
+          setDispatchState('queued');
+          setDispatchProgress(['queued']);
+          setDispatchSummary('任務已進入 queue，等待 Codex worker 接手。');
+          continue;
+        }
+        if (payload.job.status === 'running') {
+          setDispatchState('running');
+          setDispatchProgress(['queued', 'running']);
+          setDispatchSummary('Codex 正在讀取 workspace、修改程式並執行測試。');
+          continue;
+        }
+        if (payload.job.status === 'succeeded') {
+          setDispatchState('completed');
+          setDispatchProgress(['queued', 'running', 'completed']);
+          setDispatchSummary(payload.job.report?.summary || 'Codex job completed。');
+          return;
+        }
+        if (payload.job.status === 'failed') {
+          setDispatchState('failed');
+          setDispatchProgress(['queued', 'running', 'failed']);
+          setDispatchSummary(payload.job.report?.summary || payload.job.error || 'Codex job failed。');
+          return;
+        }
+      } catch {
+        if (pollingToken.current !== token) return;
+        setDispatchState('failed');
+        setDispatchProgress(['queued', 'failed']);
+        setDispatchSummary('無法讀取 job 結果，請稍後使用 /result 查詢。');
+        return;
+      }
+    }
+
+    if (pollingToken.current === token) {
+      setDispatchState('failed');
+      setDispatchProgress(['queued', 'failed']);
+      setDispatchSummary('等待 job 結果逾時，請使用 /result 查詢。');
+    }
+  };
+
   const submitTask = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!taskText.trim()) return;
+    const token = pollingToken.current + 1;
+    pollingToken.current = token;
+    setDispatchProgress([]);
+    setDispatchSummary('');
 
     if (dispatchMode === 'live') {
       setDispatchState('checking');
@@ -152,6 +221,9 @@ export default function Home() {
         }
         setDispatchJob(payload.job.id);
         setDispatchState('queued');
+        setDispatchProgress(['queued']);
+        setDispatchSummary('任務已進入 queue，等待 Codex worker 接手。');
+        void pollJob(payload.job.id, token);
       } catch {
         setDispatchState('blocked');
       }
@@ -160,6 +232,8 @@ export default function Home() {
 
     setDispatchJob('job-demo-tg01');
     setDispatchState('queued');
+    setDispatchProgress(['queued']);
+    setDispatchSummary('測試模式只模擬 queue，不會呼叫 Codex Bridge。');
   };
 
   return (
@@ -248,10 +322,23 @@ export default function Home() {
           <div className={`dispatch-result ${dispatchState}`} role="status" aria-live="polite">
             {dispatchState === 'idle' && <><span className="result-icon">○</span><span>Ready / 等待命令</span><code>POST /tg/run</code></>}
             {dispatchState === 'queued' && <><span className="result-icon result-ok">✓</span><span><strong>Codex job queued</strong> / {dispatchMode === 'live' ? 'API 實際派送' : '測試回應'}</span><code>{dispatchJob}</code></>}
+            {dispatchState === 'running' && <><span className="result-icon result-running">◌</span><span><strong>Codex job running</strong> / 正在執行任務</span><code>{dispatchJob}</code></>}
+            {dispatchState === 'completed' && <><span className="result-icon result-ok">✓</span><span><strong>Codex job completed</strong> / 已完成</span><code>{dispatchJob}</code></>}
+            {dispatchState === 'failed' && <><span className="result-icon result-warn">!</span><span><strong>Codex job failed</strong> / 執行失敗</span><code>{dispatchJob}</code></>}
             {dispatchState === 'checking' && <><span className="result-icon result-checking">◌</span><span><strong>Checking Telegram Bot</strong> / 正在驗證 Bridge API</span><code>GET /api/tg/health</code></>}
             {dispatchState === 'verified' && <><span className="result-icon result-ok">✓</span><span><strong>Telegram Bot verified</strong> / Codex bridge 尚未設定</span><code>BRIDGE_REQUIRED</code></>}
             {dispatchState === 'blocked' && <><span className="result-icon result-warn">!</span><span><strong>Live dispatch blocked</strong> / Bridge API 無法連線</span><code>BRIDGE_UNAVAILABLE</code></>}
           </div>
+          {dispatchProgress.length > 0 && <div className="dispatch-progress" aria-label="Codex job progress">
+            <div className="progress-track">
+              {(['queued', 'running', dispatchProgress.includes('failed') ? 'failed' : 'completed'] as DispatchPhase[]).map((phase, index) => {
+                const active = dispatchProgress.includes(phase);
+                const label = phase === 'queued' ? 'QUEUED' : phase === 'running' ? 'RUNNING' : phase === 'failed' ? 'FAILED' : 'COMPLETED';
+                return <span className={`progress-step ${active ? 'active' : ''} ${phase === dispatchState ? 'current' : ''}`} key={phase}><i>{String(index + 1).padStart(2, '0')}</i>{label}</span>;
+              })}
+            </div>
+            {dispatchSummary && <p>{dispatchSummary}</p>}
+          </div>}
         </div>
       </section>
 
