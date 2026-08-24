@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 
 const command = '/run 修正 Telegram worker 的 timeout lock cleanup，完成後執行 pytest，不要 push。';
 
@@ -52,6 +52,7 @@ function Arrow() {
 }
 
 type DispatchState = 'idle' | 'queued' | 'blocked' | 'checking' | 'verified';
+type BridgeHealthState = 'checking' | 'connected' | 'pending' | 'offline';
 
 export default function Home() {
   const [copied, setCopied] = useState(false);
@@ -59,6 +60,55 @@ export default function Home() {
   const [taskText, setTaskText] = useState('修正 Telegram worker 在 job timeout 後沒有清除 lock 的問題。完成後執行 pytest，不要 push。');
   const [dispatchState, setDispatchState] = useState<DispatchState>('idle');
   const [dispatchJob, setDispatchJob] = useState('job-tg01-ready');
+  const [bridgeHealth, setBridgeHealth] = useState<BridgeHealthState>('checking');
+
+  const bridgeLabel = bridgeHealth === 'connected'
+    ? 'API linked'
+    : bridgeHealth === 'checking'
+      ? '檢查中'
+      : bridgeHealth === 'offline'
+        ? '不可達'
+        : '待連線';
+
+  const refreshBridgeHealth = async () => {
+    try {
+      const response = await fetch('/api/tg/health', { cache: 'no-store' });
+      const payload = await response.json() as { ok?: boolean; bridgeConfigured?: boolean; bridgeConnected?: boolean };
+      if (payload.ok && payload.bridgeConnected) {
+        setBridgeHealth('connected');
+      } else if (payload.ok && !payload.bridgeConfigured) {
+        setBridgeHealth('pending');
+      } else {
+        setBridgeHealth('offline');
+      }
+      return payload;
+    } catch {
+      setBridgeHealth('offline');
+      return { ok: false, bridgeConfigured: false, bridgeConnected: false };
+    }
+  };
+
+  useEffect(() => {
+    let active = true;
+    fetch('/api/tg/health', { cache: 'no-store' })
+      .then((response) => response.json() as Promise<{ ok?: boolean; bridgeConfigured?: boolean; bridgeConnected?: boolean }>)
+      .then((payload) => {
+        if (!active) return;
+        if (payload.ok && payload.bridgeConnected) {
+          setBridgeHealth('connected');
+        } else if (payload.ok && !payload.bridgeConfigured) {
+          setBridgeHealth('pending');
+        } else {
+          setBridgeHealth('offline');
+        }
+      })
+      .catch(() => {
+        if (active) setBridgeHealth('offline');
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const copyCommand = async () => {
     try {
@@ -76,10 +126,32 @@ export default function Home() {
 
     if (dispatchMode === 'live') {
       setDispatchState('checking');
+      const health = await refreshBridgeHealth();
+      if (!health.ok) {
+        setDispatchState('blocked');
+        return;
+      }
+      if (!health.bridgeConfigured) {
+        setDispatchState('verified');
+        return;
+      }
+      if (!health.bridgeConnected) {
+        setDispatchState('blocked');
+        return;
+      }
       try {
-        const response = await fetch('/api/tg/health', { cache: 'no-store' });
-        const payload = await response.json() as { ok?: boolean; bridgeConfigured?: boolean };
-        setDispatchState(payload.ok ? 'verified' : 'blocked');
+        const response = await fetch('/api/tg/run', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ task: taskText, mode: 'write', provider: 'codex' }),
+        });
+        const payload = await response.json() as { ok?: boolean; job?: { id?: string } };
+        if (!response.ok || !payload.ok || !payload.job?.id) {
+          setDispatchState('blocked');
+          return;
+        }
+        setDispatchJob(payload.job.id);
+        setDispatchState('queued');
       } catch {
         setDispatchState('blocked');
       }
@@ -154,7 +226,7 @@ export default function Home() {
           <div className="credential-grid" aria-label="TG 01 連線需求">
             <div className="credential-chip"><i className="chip-ready" /><span>BOT TOKEN</span><strong>Sites Secret</strong></div>
             <div className="credential-chip"><i className="chip-ready" /><span>CHAT ID</span><strong>allowlist</strong></div>
-            <div className="credential-chip"><i className="chip-pending" /><span>CODEX BRIDGE</span><strong>待連線</strong></div>
+            <div className="credential-chip"><i className={bridgeHealth === 'connected' ? 'chip-ready' : 'chip-pending'} /><span>CODEX BRIDGE</span><strong>{bridgeLabel}</strong></div>
           </div>
           <p className="tg-safety-note"><span>⌁</span> Token 不放進前端，也不用貼在聊天裡；正式連線時只會讀取 Sites 的私密設定。</p>
         </div>
@@ -170,15 +242,15 @@ export default function Home() {
                 <button className={dispatchMode === 'test' ? 'selected' : ''} onClick={() => setDispatchMode('test')} type="button">測試佇列</button>
                 <button className={dispatchMode === 'live' ? 'selected live' : ''} onClick={() => setDispatchMode('live')} type="button">實際派送</button>
               </div>
-              <button className="send-button" disabled={dispatchState === 'checking'} type="submit">{dispatchMode === 'test' ? '送出測試命令' : '檢查實際連線'} <span>↗</span></button>
+              <button className="send-button" disabled={dispatchState === 'checking'} type="submit">{dispatchMode === 'test' ? '送出測試命令' : '實際派送'} <span>↗</span></button>
             </div>
           </form>
           <div className={`dispatch-result ${dispatchState}`} role="status" aria-live="polite">
             {dispatchState === 'idle' && <><span className="result-icon">○</span><span>Ready / 等待命令</span><code>POST /tg/run</code></>}
-            {dispatchState === 'queued' && <><span className="result-icon result-ok">✓</span><span><strong>Codex job queued</strong> / 測試回應</span><code>{dispatchJob}</code></>}
-            {dispatchState === 'checking' && <><span className="result-icon result-checking">◌</span><span><strong>Checking Telegram Bot</strong> / 正在驗證連線</span><code>GET /api/tg/health</code></>}
+            {dispatchState === 'queued' && <><span className="result-icon result-ok">✓</span><span><strong>Codex job queued</strong> / {dispatchMode === 'live' ? 'API 實際派送' : '測試回應'}</span><code>{dispatchJob}</code></>}
+            {dispatchState === 'checking' && <><span className="result-icon result-checking">◌</span><span><strong>Checking Telegram Bot</strong> / 正在驗證 Bridge API</span><code>GET /api/tg/health</code></>}
             {dispatchState === 'verified' && <><span className="result-icon result-ok">✓</span><span><strong>Telegram Bot verified</strong> / Codex bridge 尚未設定</span><code>BRIDGE_REQUIRED</code></>}
-            {dispatchState === 'blocked' && <><span className="result-icon result-warn">!</span><span><strong>Live dispatch blocked</strong> / 請檢查 Bot 設定</span><code>CONFIG_REQUIRED</code></>}
+            {dispatchState === 'blocked' && <><span className="result-icon result-warn">!</span><span><strong>Live dispatch blocked</strong> / Bridge API 無法連線</span><code>BRIDGE_UNAVAILABLE</code></>}
           </div>
         </div>
       </section>

@@ -10,6 +10,20 @@ type TelegramResponse = {
   };
 };
 
+type BridgeHealthResponse = {
+  ok?: boolean;
+  service?: string;
+  api?: string;
+  queue?: Record<string, number>;
+};
+
+function bridgeConfig() {
+  return {
+    url: (process.env.CODEX_BRIDGE_URL ?? '').replace(/\/+$/, ''),
+    token: process.env.CODEX_BRIDGE_API_TOKEN ?? '',
+  };
+}
+
 export async function GET() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const allowedUserIds = (process.env.TELEGRAM_ALLOWED_USER_IDS ?? '')
@@ -37,6 +51,26 @@ export async function GET() {
       );
     }
 
+    const bridge = bridgeConfig();
+    let bridgeConnected = false;
+    let bridgeCode = 'BRIDGE_REQUIRED';
+    let bridgeHealth: BridgeHealthResponse | null = null;
+    if (bridge.url && bridge.token) {
+      try {
+        const bridgeResponse = await fetch(`${bridge.url}/health`, {
+          headers: { Authorization: `Bearer ${bridge.token}` },
+          cache: 'no-store',
+        });
+        bridgeHealth = (await bridgeResponse.json()) as BridgeHealthResponse;
+        bridgeConnected = bridgeResponse.ok && bridgeHealth.ok === true;
+        bridgeCode = bridgeConnected ? 'BRIDGE_READY' : 'BRIDGE_UNREACHABLE';
+      } catch {
+        bridgeCode = 'BRIDGE_UNREACHABLE';
+      }
+    } else if (bridge.url && !bridge.token) {
+      bridgeCode = 'BRIDGE_AUTH_REQUIRED';
+    }
+
     return NextResponse.json({
       ok: true,
       bot: {
@@ -45,7 +79,10 @@ export async function GET() {
         name: payload.result.first_name,
       },
       allowedUserCount: allowedUserIds.length,
-      bridgeConfigured: Boolean(process.env.CODEX_BRIDGE_URL),
+      bridgeConfigured: Boolean(bridge.url),
+      bridgeConnected,
+      bridgeCode,
+      bridge: bridgeHealth ? { service: bridgeHealth.service, api: bridgeHealth.api, queue: bridgeHealth.queue } : null,
     });
   } catch {
     return NextResponse.json(
