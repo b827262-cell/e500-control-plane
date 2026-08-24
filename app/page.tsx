@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, type FormEvent } from 'react';
 
 const command = '/run 修正 Telegram worker 的 timeout lock cleanup，完成後執行 pytest，不要 push。';
 
@@ -51,8 +51,14 @@ function Arrow() {
   return <span className="pipeline-arrow" aria-hidden="true">→</span>;
 }
 
+type DispatchState = 'idle' | 'queued' | 'blocked';
+
 export default function Home() {
   const [copied, setCopied] = useState(false);
+  const [dispatchMode, setDispatchMode] = useState<'test' | 'live'>('test');
+  const [taskText, setTaskText] = useState('修正 Telegram worker 在 job timeout 後沒有清除 lock 的問題。完成後執行 pytest，不要 push。');
+  const [dispatchState, setDispatchState] = useState<DispatchState>('idle');
+  const [dispatchJob, setDispatchJob] = useState('job-tg01-ready');
 
   const copyCommand = async () => {
     try {
@@ -64,6 +70,19 @@ export default function Home() {
     }
   };
 
+  const submitTask = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!taskText.trim()) return;
+
+    if (dispatchMode === 'live') {
+      setDispatchState('blocked');
+      return;
+    }
+
+    setDispatchJob('job-demo-tg01');
+    setDispatchState('queued');
+  };
+
   return (
     <main className="site-shell">
       <div className="noise" aria-hidden="true" />
@@ -73,6 +92,7 @@ export default function Home() {
           <span>E500 <em>/</em> CONTROL PLANE</span>
         </a>
         <nav className="nav-links" aria-label="主要導覽">
+          <a href="#tg-command">TG 01</a>
           <a href="#architecture">架構</a>
           <a href="#lifecycle">生命週期</a>
           <a href="#commands">指令</a>
@@ -117,6 +137,41 @@ export default function Home() {
         <div><strong>04</strong><span>job states</span><b>tracked</b></div>
         <div><strong>00</strong><span>browser automation</span><b>needed</b></div>
         <div><strong>100%</strong><span>Git safety</span><b>preserved</b></div>
+      </section>
+
+      <section className="tg-command section-wrap" id="tg-command">
+        <div className="tg-command-copy">
+          <p className="section-kicker">TG 01 / LIVE COMMAND SURFACE</p>
+          <h2>從這裡，<br /><span>把命令交給 Codex。</span></h2>
+          <p className="panel-lede">這是 Telegram → Codex 的實際下達命令區。先用測試模式確認 payload 與回應，再開啟實際派送。</p>
+          <div className="credential-grid" aria-label="TG 01 連線需求">
+            <div className="credential-chip"><i className="chip-ready" /><span>BOT TOKEN</span><strong>Sites Secret</strong></div>
+            <div className="credential-chip"><i className="chip-ready" /><span>CHAT ID</span><strong>allowlist</strong></div>
+            <div className="credential-chip"><i className="chip-pending" /><span>CODEX BRIDGE</span><strong>待連線</strong></div>
+          </div>
+          <p className="tg-safety-note"><span>⌁</span> Token 不放進前端，也不用貼在聊天裡；正式連線時只會讀取 Sites 的私密設定。</p>
+        </div>
+
+        <div className="tg-console">
+          <div className="console-top"><span className="console-label"><b /> TG 01 / COMMAND CONSOLE</span><span className={`console-mode ${dispatchMode}`}>{dispatchMode === 'test' ? 'TEST MODE' : 'LIVE MODE'}</span></div>
+          <form onSubmit={submitTask}>
+            <label className="console-label-text" htmlFor="tg-task">COMMAND PAYLOAD <span>/run</span></label>
+            <div className="task-field"><span>/run</span><textarea id="tg-task" value={taskText} onChange={(event) => { setTaskText(event.target.value); setDispatchState('idle'); }} rows={4} aria-describedby="tg-task-help" /></div>
+            <p className="console-help" id="tg-task-help">會送往預設 provider <strong>codex</strong>，並保留 workspace-write / no-push 邊界。</p>
+            <div className="console-controls">
+              <div className="mode-switch" aria-label="派送模式">
+                <button className={dispatchMode === 'test' ? 'selected' : ''} onClick={() => setDispatchMode('test')} type="button">測試佇列</button>
+                <button className={dispatchMode === 'live' ? 'selected live' : ''} onClick={() => setDispatchMode('live')} type="button">實際派送</button>
+              </div>
+              <button className="send-button" type="submit">{dispatchMode === 'test' ? '送出測試命令' : '檢查實際連線'} <span>↗</span></button>
+            </div>
+          </form>
+          <div className={`dispatch-result ${dispatchState}`} role="status" aria-live="polite">
+            {dispatchState === 'idle' && <><span className="result-icon">○</span><span>Ready / 等待命令</span><code>POST /tg/run</code></>}
+            {dispatchState === 'queued' && <><span className="result-icon result-ok">✓</span><span><strong>Codex job queued</strong> / 測試回應</span><code>{dispatchJob}</code></>}
+            {dispatchState === 'blocked' && <><span className="result-icon result-warn">!</span><span><strong>Live dispatch blocked</strong> / 尚未設定安全連線</span><code>CONFIG_REQUIRED</code></>}
+          </div>
+        </div>
       </section>
 
       <section className="architecture section-wrap" id="architecture">
