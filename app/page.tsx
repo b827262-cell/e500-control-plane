@@ -66,13 +66,46 @@ type JobPayload = {
   } | null;
 };
 
+type WorkflowJobPayload = {
+  workflow_stage?: string | null;
+  status?: string;
+};
+
 type WorkflowPayload = {
   status?: string;
   current_stage?: string;
   github_url?: string | null;
   github_status?: string | null;
   error?: string | null;
+  jobs?: WorkflowJobPayload[];
 };
+
+type WorkflowLightState = 'green' | 'yellow' | 'red' | 'off';
+type WorkflowStage = 'gpt' | 'agy' | 'claude';
+
+const workflowStages: Array<{ key: WorkflowStage; label: string }> = [
+  { key: 'gpt', label: 'GPT / CODEX' },
+  { key: 'agy', label: 'AGY' },
+  { key: 'claude', label: 'CLAUDE' },
+];
+
+const workflowLightLabels: Record<WorkflowLightState, string> = {
+  green: '通過',
+  yellow: '警告 / 進行中',
+  red: '失敗',
+  off: '等待',
+};
+
+function getWorkflowLight(workflow: WorkflowPayload | null, stage: WorkflowStage): WorkflowLightState {
+  const job = workflow?.jobs?.find((item) => item.workflow_stage?.toLowerCase() === stage);
+  const status = job?.status?.toLowerCase();
+  if (status === 'succeeded' || status === 'completed' || status === 'success') return 'green';
+  if (status === 'failed' || status === 'cancelled' || status === 'canceled') return 'red';
+  if (status === 'queued' || status === 'running') return 'yellow';
+  if ((workflow?.status === 'queued' || workflow?.status === 'running') && workflow.current_stage?.toLowerCase() === stage) return 'yellow';
+  if (workflow?.status === 'failed' && workflow.current_stage?.toLowerCase() === stage) return 'red';
+  return 'off';
+}
 
 export default function Home() {
   const [copied, setCopied] = useState(false);
@@ -82,6 +115,7 @@ export default function Home() {
   const [dispatchState, setDispatchState] = useState<DispatchState>('idle');
   const [dispatchJob, setDispatchJob] = useState('job-tg01-ready');
   const [workflowId, setWorkflowId] = useState('');
+  const [workflowState, setWorkflowState] = useState<WorkflowPayload | null>(null);
   const [dispatchProgress, setDispatchProgress] = useState<DispatchPhase[]>([]);
   const [dispatchSummary, setDispatchSummary] = useState('');
   const [bridgeHealth, setBridgeHealth] = useState<BridgeHealthState>('checking');
@@ -211,6 +245,7 @@ export default function Home() {
         if (!response.ok || !payload.ok || !payload.workflow?.status) throw new Error('workflow unavailable');
         if (pollingToken.current !== token) return;
         const workflow = payload.workflow;
+        setWorkflowState(workflow);
         if (workflow.status === 'succeeded') {
           setDispatchState('completed');
           setDispatchProgress(['queued', 'running', 'completed']);
@@ -249,6 +284,7 @@ export default function Home() {
     const token = pollingToken.current + 1;
     pollingToken.current = token;
     setWorkflowId('');
+    setWorkflowState(null);
     setDispatchProgress([]);
     setDispatchSummary('');
 
@@ -274,7 +310,7 @@ export default function Home() {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ task: taskText, mode: 'write', provider: 'codex' }),
         });
-        const payload = await response.json() as { ok?: boolean; job?: { id?: string }; workflow?: { id?: string } };
+        const payload = await response.json() as { ok?: boolean; job?: { id?: string }; workflow?: WorkflowPayload & { id?: string } };
         if (!response.ok || !payload.ok || !payload.job?.id) {
           setDispatchState('blocked');
           return;
@@ -284,6 +320,7 @@ export default function Home() {
         setDispatchProgress(['queued']);
         if (dispatchFlow === 'loop' && payload.workflow?.id) {
           setWorkflowId(payload.workflow.id);
+          setWorkflowState(payload.workflow);
           setDispatchSummary('GPT stage 已進入 queue，完成後自動接 AGY、Claude 與 GitHub 報告。');
           void pollWorkflow(payload.workflow.id, token);
         } else {
@@ -377,7 +414,7 @@ export default function Home() {
           <div className="console-top"><span className="console-label"><b /> TG 01 / COMMAND CONSOLE</span><span className={`console-mode ${dispatchMode}`}>{dispatchMode === 'test' ? 'TEST MODE' : 'LIVE MODE'}</span></div>
           <form onSubmit={submitTask}>
             <label className="console-label-text" htmlFor="tg-task">COMMAND PAYLOAD <span>/{dispatchFlow === 'loop' ? 'gpt' : 'run'}</span></label>
-            <div className="task-field"><span>/{dispatchFlow === 'loop' ? 'gpt' : 'run'}</span><textarea id="tg-task" value={taskText} onChange={(event) => { setTaskText(event.target.value); setDispatchState('idle'); setWorkflowId(''); }} rows={4} aria-describedby="tg-task-help" /></div>
+            <div className="task-field"><span>/{dispatchFlow === 'loop' ? 'gpt' : 'run'}</span><textarea id="tg-task" value={taskText} onChange={(event) => { setTaskText(event.target.value); setDispatchState('idle'); setWorkflowId(''); setWorkflowState(null); }} rows={4} aria-describedby="tg-task-help" /></div>
             <p className="console-help" id="tg-task-help">{dispatchFlow === 'loop' ? <>依序排程 <strong>Codex → AGY → Claude</strong>，完成後上傳 redacted GitHub Markdown 報告。</> : <>會送往預設 provider <strong>codex</strong>，並保留 workspace-write / no-push 邊界。</>}</p>
             <div className="console-controls">
               <div className="flow-switch mode-switch" aria-label="工作流程">
@@ -410,6 +447,25 @@ export default function Home() {
               })}
             </div>
             {dispatchSummary && <p>{dispatchSummary}</p>}
+          </div>}
+          {workflowId && workflowState && <div className="workflow-lights" aria-label="GPT AGY Claude 三燈管制">
+            <div className="workflow-lights-head">
+              <span>PIPELINE LIGHTS / 三燈管制</span>
+              <span className="workflow-legend">
+                <span><i className="traffic-key red" />失敗</span>
+                <span><i className="traffic-key yellow" />警告</span>
+                <span><i className="traffic-key green" />通過</span>
+              </span>
+            </div>
+            <div className="workflow-lights-grid">
+              {workflowStages.map((stage) => {
+                const light = getWorkflowLight(workflowState, stage.key);
+                return <div className="workflow-light-card" key={stage.key}>
+                  <span className={`traffic-light ${light}`} aria-label={`${stage.label}：${workflowLightLabels[light]}`}><i /></span>
+                  <span><strong>{stage.label}</strong><small>{workflowLightLabels[light]}</small></span>
+                </div>;
+              })}
+            </div>
           </div>}
         </div>
       </section>
