@@ -109,6 +109,7 @@ function getWorkflowLight(workflow: WorkflowPayload | null, stage: WorkflowStage
 
 export default function Home() {
   const [copied, setCopied] = useState(false);
+  const [errorCopied, setErrorCopied] = useState(false);
   const [dispatchMode, setDispatchMode] = useState<'test' | 'live'>('test');
   const [dispatchFlow, setDispatchFlow] = useState<'single' | 'loop'>('loop');
   const [taskText, setTaskText] = useState('修正 Telegram worker 在 job timeout 後沒有清除 lock 的問題。完成後執行 pytest，不要 push。');
@@ -179,6 +180,18 @@ export default function Home() {
     }
   };
 
+  const copyWorkflowError = async () => {
+    const query = workflowId ? `/workflow ${workflowId}` : '/workflow <flow_id>';
+    const errorText = `E500 workflow error\n${dispatchSummary}\n查詢命令：${query}`;
+    try {
+      await navigator.clipboard.writeText(errorText);
+      setErrorCopied(true);
+      window.setTimeout(() => setErrorCopied(false), 1800);
+    } catch {
+      setErrorCopied(false);
+    }
+  };
+
   const pollJob = async (jobId: string, token: number) => {
     for (let attempt = 0; attempt < 180; attempt += 1) {
       if (pollingToken.current !== token) return;
@@ -241,8 +254,10 @@ export default function Home() {
 
       try {
         const response = await fetch(`/api/tg/workflow/${encodeURIComponent(flowId)}`, { cache: 'no-store' });
-        const payload = await response.json() as { ok?: boolean; workflow?: WorkflowPayload };
-        if (!response.ok || !payload.ok || !payload.workflow?.status) throw new Error('workflow unavailable');
+        const payload = await response.json() as { ok?: boolean; error?: string; workflow?: WorkflowPayload };
+        if (!response.ok || !payload.ok || !payload.workflow?.status) {
+          throw new Error(payload.error || payload.workflow?.error || `HTTP ${response.status}`);
+        }
         if (pollingToken.current !== token) return;
         const workflow = payload.workflow;
         setWorkflowState(workflow);
@@ -262,11 +277,12 @@ export default function Home() {
         setDispatchProgress(['queued', 'running']);
         const stage = workflow.current_stage?.toUpperCase() || 'GPT';
         setDispatchSummary(`${stage} stage 進行中；完成後自動接續下一階段。`);
-      } catch {
+      } catch (error) {
         if (pollingToken.current !== token) return;
         setDispatchState('failed');
         setDispatchProgress(['queued', 'failed']);
-        setDispatchSummary('無法讀取 workflow 結果，請稍後使用 /workflow 查詢。');
+        const detail = error instanceof Error ? error.message : '未知錯誤';
+        setDispatchSummary(`無法讀取 workflow 結果：${detail}。請使用 /workflow ${flowId} 查詢。`);
         return;
       }
     }
@@ -274,7 +290,7 @@ export default function Home() {
     if (pollingToken.current === token) {
       setDispatchState('failed');
       setDispatchProgress(['queued', 'failed']);
-      setDispatchSummary('等待 workflow 結果逾時，請使用 /workflow 查詢。');
+      setDispatchSummary(`等待 workflow 結果逾時，請使用 /workflow ${flowId} 查詢。`);
     }
   };
 
@@ -285,6 +301,7 @@ export default function Home() {
     pollingToken.current = token;
     setWorkflowId('');
     setWorkflowState(null);
+    setErrorCopied(false);
     setDispatchProgress([]);
     setDispatchSummary('');
 
@@ -414,7 +431,7 @@ export default function Home() {
           <div className="console-top"><span className="console-label"><b /> TG 01 / COMMAND CONSOLE</span><span className={`console-mode ${dispatchMode}`}>{dispatchMode === 'test' ? 'TEST MODE' : 'LIVE MODE'}</span></div>
           <form onSubmit={submitTask}>
             <label className="console-label-text" htmlFor="tg-task">COMMAND PAYLOAD <span>/{dispatchFlow === 'loop' ? 'gpt' : 'run'}</span></label>
-            <div className="task-field"><span>/{dispatchFlow === 'loop' ? 'gpt' : 'run'}</span><textarea id="tg-task" value={taskText} onChange={(event) => { setTaskText(event.target.value); setDispatchState('idle'); setWorkflowId(''); setWorkflowState(null); }} rows={4} aria-describedby="tg-task-help" /></div>
+            <div className="task-field"><span>/{dispatchFlow === 'loop' ? 'gpt' : 'run'}</span><textarea id="tg-task" value={taskText} onChange={(event) => { setTaskText(event.target.value); setDispatchState('idle'); setWorkflowId(''); setWorkflowState(null); setErrorCopied(false); }} rows={4} aria-describedby="tg-task-help" /></div>
             <p className="console-help" id="tg-task-help">{dispatchFlow === 'loop' ? <>依序排程 <strong>Codex → AGY → Claude</strong>，完成後上傳 redacted GitHub Markdown 報告。</> : <>會送往預設 provider <strong>codex</strong>，並保留 workspace-write / no-push 邊界。</>}</p>
             <div className="console-controls">
               <div className="flow-switch mode-switch" aria-label="工作流程">
@@ -446,7 +463,7 @@ export default function Home() {
                 return <span className={`progress-step ${active ? 'active' : ''} ${phase === dispatchState ? 'current' : ''}`} key={phase}><i>{String(index + 1).padStart(2, '0')}</i>{label}</span>;
               })}
             </div>
-            {dispatchSummary && <p>{dispatchSummary}</p>}
+            {dispatchSummary && <div className="dispatch-summary"><p>{dispatchSummary}</p>{dispatchState === 'failed' && workflowId && <div className="workflow-error-actions"><code>/workflow {workflowId}</code><button className="copy-error-button" onClick={copyWorkflowError} type="button"><span>{errorCopied ? '✓' : '⧉'}</span>{errorCopied ? '已複製錯誤訊息' : '複製錯誤訊息'}</button></div>}</div>}
           </div>}
           {workflowId && workflowState && <div className="workflow-lights" aria-label="GPT AGY Claude 三燈管制">
             <div className="workflow-lights-head">
