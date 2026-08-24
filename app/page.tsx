@@ -42,9 +42,11 @@ const lifecycle = [
 const commands = [
   ['/ping', 'Bot / worker 健康檢查'],
   ['/run <task>', '預設送往 Codex'],
+  ['/gpt <task>', 'Codex → AGY → Claude → GitHub 報告'],
+  ['/agy <task>', '排入 AGY review queue'],
+  ['/claude <task>', '排入 Claude final queue'],
   ['/status', '查看 queue 與 running jobs'],
-  ['/result <job_id>', '查詢任務結果'],
-  ['/cancel <job_id>', '取消未完成任務'],
+  ['/workflow <flow_id>', '查詢串接流程'],
 ];
 
 function Arrow() {
@@ -56,6 +58,7 @@ type DispatchPhase = 'queued' | 'running' | 'completed' | 'failed';
 type BridgeHealthState = 'checking' | 'connected' | 'pending' | 'offline';
 
 type JobPayload = {
+  workflow_stage?: string | null;
   status?: string;
   error?: string | null;
   report?: {
@@ -63,12 +66,22 @@ type JobPayload = {
   } | null;
 };
 
+type WorkflowPayload = {
+  status?: string;
+  current_stage?: string;
+  github_url?: string | null;
+  github_status?: string | null;
+  error?: string | null;
+};
+
 export default function Home() {
   const [copied, setCopied] = useState(false);
   const [dispatchMode, setDispatchMode] = useState<'test' | 'live'>('test');
+  const [dispatchFlow, setDispatchFlow] = useState<'single' | 'loop'>('loop');
   const [taskText, setTaskText] = useState('修正 Telegram worker 在 job timeout 後沒有清除 lock 的問題。完成後執行 pytest，不要 push。');
   const [dispatchState, setDispatchState] = useState<DispatchState>('idle');
   const [dispatchJob, setDispatchJob] = useState('job-tg01-ready');
+  const [workflowId, setWorkflowId] = useState('');
   const [dispatchProgress, setDispatchProgress] = useState<DispatchPhase[]>([]);
   const [dispatchSummary, setDispatchSummary] = useState('');
   const [bridgeHealth, setBridgeHealth] = useState<BridgeHealthState>('checking');
@@ -185,11 +198,57 @@ export default function Home() {
     }
   };
 
+  const pollWorkflow = async (flowId: string, token: number) => {
+    for (let attempt = 0; attempt < 180; attempt += 1) {
+      if (pollingToken.current !== token) return;
+      if (attempt > 0) {
+        await new Promise((resolve) => window.setTimeout(resolve, 2000));
+      }
+
+      try {
+        const response = await fetch(`/api/tg/workflow/${encodeURIComponent(flowId)}`, { cache: 'no-store' });
+        const payload = await response.json() as { ok?: boolean; workflow?: WorkflowPayload };
+        if (!response.ok || !payload.ok || !payload.workflow?.status) throw new Error('workflow unavailable');
+        if (pollingToken.current !== token) return;
+        const workflow = payload.workflow;
+        if (workflow.status === 'succeeded') {
+          setDispatchState('completed');
+          setDispatchProgress(['queued', 'running', 'completed']);
+          setDispatchSummary(`GPT → AGY → Claude 已完成，GitHub 報告：${workflow.github_url || workflow.github_status || '已處理'}`);
+          return;
+        }
+        if (workflow.status === 'failed') {
+          setDispatchState('failed');
+          setDispatchProgress(['queued', 'running', 'failed']);
+          setDispatchSummary(workflow.error || `${workflow.current_stage || 'workflow'} stage failed。`);
+          return;
+        }
+        setDispatchState(workflow.status === 'queued' ? 'queued' : 'running');
+        setDispatchProgress(['queued', 'running']);
+        const stage = workflow.current_stage?.toUpperCase() || 'GPT';
+        setDispatchSummary(`${stage} stage 進行中；完成後自動接續下一階段。`);
+      } catch {
+        if (pollingToken.current !== token) return;
+        setDispatchState('failed');
+        setDispatchProgress(['queued', 'failed']);
+        setDispatchSummary('無法讀取 workflow 結果，請稍後使用 /workflow 查詢。');
+        return;
+      }
+    }
+
+    if (pollingToken.current === token) {
+      setDispatchState('failed');
+      setDispatchProgress(['queued', 'failed']);
+      setDispatchSummary('等待 workflow 結果逾時，請使用 /workflow 查詢。');
+    }
+  };
+
   const submitTask = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!taskText.trim()) return;
     const token = pollingToken.current + 1;
     pollingToken.current = token;
+    setWorkflowId('');
     setDispatchProgress([]);
     setDispatchSummary('');
 
@@ -209,12 +268,13 @@ export default function Home() {
         return;
       }
       try {
-        const response = await fetch('/api/tg/run', {
+        const endpoint = dispatchFlow === 'loop' ? '/api/tg/workflow' : '/api/tg/run';
+        const response = await fetch(endpoint, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ task: taskText, mode: 'write', provider: 'codex' }),
         });
-        const payload = await response.json() as { ok?: boolean; job?: { id?: string } };
+        const payload = await response.json() as { ok?: boolean; job?: { id?: string }; workflow?: { id?: string } };
         if (!response.ok || !payload.ok || !payload.job?.id) {
           setDispatchState('blocked');
           return;
@@ -222,8 +282,14 @@ export default function Home() {
         setDispatchJob(payload.job.id);
         setDispatchState('queued');
         setDispatchProgress(['queued']);
-        setDispatchSummary('任務已進入 queue，等待 Codex worker 接手。');
-        void pollJob(payload.job.id, token);
+        if (dispatchFlow === 'loop' && payload.workflow?.id) {
+          setWorkflowId(payload.workflow.id);
+          setDispatchSummary('GPT stage 已進入 queue，完成後自動接 AGY、Claude 與 GitHub 報告。');
+          void pollWorkflow(payload.workflow.id, token);
+        } else {
+          setDispatchSummary('任務已進入 queue，等待 Codex worker 接手。');
+          void pollJob(payload.job.id, token);
+        }
       } catch {
         setDispatchState('blocked');
       }
@@ -233,7 +299,9 @@ export default function Home() {
     setDispatchJob('job-demo-tg01');
     setDispatchState('queued');
     setDispatchProgress(['queued']);
-    setDispatchSummary('測試模式只模擬 queue，不會呼叫 Codex Bridge。');
+    setDispatchSummary(dispatchFlow === 'loop'
+      ? '測試模式只模擬 GPT → AGY → Claude queue，不會呼叫 Codex Bridge。'
+      : '測試模式只模擬 queue，不會呼叫 Codex Bridge。');
   };
 
   return (
@@ -308,10 +376,14 @@ export default function Home() {
         <div className="tg-console">
           <div className="console-top"><span className="console-label"><b /> TG 01 / COMMAND CONSOLE</span><span className={`console-mode ${dispatchMode}`}>{dispatchMode === 'test' ? 'TEST MODE' : 'LIVE MODE'}</span></div>
           <form onSubmit={submitTask}>
-            <label className="console-label-text" htmlFor="tg-task">COMMAND PAYLOAD <span>/run</span></label>
-            <div className="task-field"><span>/run</span><textarea id="tg-task" value={taskText} onChange={(event) => { setTaskText(event.target.value); setDispatchState('idle'); }} rows={4} aria-describedby="tg-task-help" /></div>
-            <p className="console-help" id="tg-task-help">會送往預設 provider <strong>codex</strong>，並保留 workspace-write / no-push 邊界。</p>
+            <label className="console-label-text" htmlFor="tg-task">COMMAND PAYLOAD <span>/{dispatchFlow === 'loop' ? 'gpt' : 'run'}</span></label>
+            <div className="task-field"><span>/{dispatchFlow === 'loop' ? 'gpt' : 'run'}</span><textarea id="tg-task" value={taskText} onChange={(event) => { setTaskText(event.target.value); setDispatchState('idle'); setWorkflowId(''); }} rows={4} aria-describedby="tg-task-help" /></div>
+            <p className="console-help" id="tg-task-help">{dispatchFlow === 'loop' ? <>依序排程 <strong>Codex → AGY → Claude</strong>，完成後上傳 redacted GitHub Markdown 報告。</> : <>會送往預設 provider <strong>codex</strong>，並保留 workspace-write / no-push 邊界。</>}</p>
             <div className="console-controls">
+              <div className="flow-switch mode-switch" aria-label="工作流程">
+                <button className={dispatchFlow === 'single' ? 'selected' : ''} onClick={() => setDispatchFlow('single')} type="button">單一 /run</button>
+                <button className={dispatchFlow === 'loop' ? 'selected live' : ''} onClick={() => setDispatchFlow('loop')} type="button">GPT LOOP /gpt</button>
+              </div>
               <div className="mode-switch" aria-label="派送模式">
                 <button className={dispatchMode === 'test' ? 'selected' : ''} onClick={() => setDispatchMode('test')} type="button">測試佇列</button>
                 <button className={dispatchMode === 'live' ? 'selected live' : ''} onClick={() => setDispatchMode('live')} type="button">實際派送</button>
@@ -321,10 +393,10 @@ export default function Home() {
           </form>
           <div className={`dispatch-result ${dispatchState}`} role="status" aria-live="polite">
             {dispatchState === 'idle' && <><span className="result-icon">○</span><span>Ready / 等待命令</span><code>POST /tg/run</code></>}
-            {dispatchState === 'queued' && <><span className="result-icon result-ok">✓</span><span><strong>Codex job queued</strong> / {dispatchMode === 'live' ? 'API 實際派送' : '測試回應'}</span><code>{dispatchJob}</code></>}
-            {dispatchState === 'running' && <><span className="result-icon result-running">◌</span><span><strong>Codex job running</strong> / 正在執行任務</span><code>{dispatchJob}</code></>}
-            {dispatchState === 'completed' && <><span className="result-icon result-ok">✓</span><span><strong>Codex job completed</strong> / 已完成</span><code>{dispatchJob}</code></>}
-            {dispatchState === 'failed' && <><span className="result-icon result-warn">!</span><span><strong>Codex job failed</strong> / 執行失敗</span><code>{dispatchJob}</code></>}
+            {dispatchState === 'queued' && <><span className="result-icon result-ok">✓</span><span><strong>{workflowId ? 'Workflow queued' : 'Codex job queued'}</strong> / {dispatchMode === 'live' ? 'API 實際派送' : '測試回應'}</span><code>{workflowId || dispatchJob}</code></>}
+            {dispatchState === 'running' && <><span className="result-icon result-running">◌</span><span><strong>{workflowId ? 'Workflow running' : 'Codex job running'}</strong> / 正在執行任務</span><code>{workflowId || dispatchJob}</code></>}
+            {dispatchState === 'completed' && <><span className="result-icon result-ok">✓</span><span><strong>{workflowId ? 'Workflow completed' : 'Codex job completed'}</strong> / 已完成</span><code>{workflowId || dispatchJob}</code></>}
+            {dispatchState === 'failed' && <><span className="result-icon result-warn">!</span><span><strong>{workflowId ? 'Workflow failed' : 'Codex job failed'}</strong> / 執行失敗</span><code>{workflowId || dispatchJob}</code></>}
             {dispatchState === 'checking' && <><span className="result-icon result-checking">◌</span><span><strong>Checking Telegram Bot</strong> / 正在驗證 Bridge API</span><code>GET /api/tg/health</code></>}
             {dispatchState === 'verified' && <><span className="result-icon result-ok">✓</span><span><strong>Telegram Bot verified</strong> / Codex bridge 尚未設定</span><code>BRIDGE_REQUIRED</code></>}
             {dispatchState === 'blocked' && <><span className="result-icon result-warn">!</span><span><strong>Live dispatch blocked</strong> / Bridge API 無法連線</span><code>BRIDGE_UNAVAILABLE</code></>}
