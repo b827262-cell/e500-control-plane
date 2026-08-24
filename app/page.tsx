@@ -69,6 +69,7 @@ type JobPayload = {
 type WorkflowJobPayload = {
   workflow_stage?: string | null;
   status?: string;
+  progress?: number | null;
 };
 
 type WorkflowPayload = {
@@ -80,7 +81,7 @@ type WorkflowPayload = {
   jobs?: WorkflowJobPayload[];
 };
 
-type WorkflowLightState = 'green' | 'yellow' | 'red' | 'off';
+type WorkflowLightState = 'green' | 'progress' | 'red' | 'off';
 type WorkflowStage = 'gpt' | 'agy' | 'claude';
 
 const workflowStages: Array<{ key: WorkflowStage; label: string }> = [
@@ -91,7 +92,7 @@ const workflowStages: Array<{ key: WorkflowStage; label: string }> = [
 
 const workflowLightLabels: Record<WorkflowLightState, string> = {
   green: '通過',
-  yellow: '警告 / 進行中',
+  progress: '進行中',
   red: '失敗',
   off: '等待',
 };
@@ -101,10 +102,21 @@ function getWorkflowLight(workflow: WorkflowPayload | null, stage: WorkflowStage
   const status = job?.status?.toLowerCase();
   if (status === 'succeeded' || status === 'completed' || status === 'success') return 'green';
   if (status === 'failed' || status === 'cancelled' || status === 'canceled') return 'red';
-  if (status === 'queued' || status === 'running') return 'yellow';
-  if ((workflow?.status === 'queued' || workflow?.status === 'running') && workflow.current_stage?.toLowerCase() === stage) return 'yellow';
+  if (status === 'queued' || status === 'running') return 'progress';
+  if ((workflow?.status === 'queued' || workflow?.status === 'running') && workflow.current_stage?.toLowerCase() === stage) return 'progress';
   if (workflow?.status === 'failed' && workflow.current_stage?.toLowerCase() === stage) return 'red';
   return 'off';
+}
+
+function getWorkflowProgress(workflow: WorkflowPayload | null, stage: WorkflowStage): number {
+  const job = workflow?.jobs?.find((item) => item.workflow_stage?.toLowerCase() === stage);
+  if (typeof job?.progress === 'number' && Number.isFinite(job.progress)) {
+    return Math.max(0, Math.min(100, Math.round(job.progress)));
+  }
+  const status = job?.status?.toLowerCase();
+  if (status === 'succeeded' || status === 'completed' || status === 'success') return 100;
+  if (status === 'running') return 50;
+  return 0;
 }
 
 export default function Home() {
@@ -477,9 +489,10 @@ export default function Home() {
             <div className="workflow-lights-grid">
               {workflowStages.map((stage) => {
                 const light = getWorkflowLight(workflowState, stage.key);
+                const progress = getWorkflowProgress(workflowState, stage.key);
                 return <div className="workflow-light-card" key={stage.key}>
                   <span className={`traffic-light ${light}`} aria-label={`${stage.label}：${workflowLightLabels[light]}`}><i /></span>
-                  <span><strong>{stage.label}</strong><small>{workflowLightLabels[light]}</small></span>
+                  <span className="workflow-light-content"><span className="workflow-light-title"><strong>{stage.label}</strong><small>{workflowLightLabels[light]}</small></span><span className="workflow-progress-row" aria-label={`${stage.label} 完成度 ${progress}%`}><span className="workflow-progress-track"><span style={{ width: `${progress}%` }} /></span><em>{progress}%</em></span></span>
                 </div>;
               })}
             </div>
