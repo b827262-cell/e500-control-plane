@@ -51,7 +51,7 @@ function Arrow() {
   return <span className="pipeline-arrow" aria-hidden="true">→</span>;
 }
 
-type DispatchState = 'idle' | 'queued' | 'blocked';
+type DispatchState = 'idle' | 'queued' | 'blocked' | 'checking' | 'verified';
 
 export default function Home() {
   const [copied, setCopied] = useState(false);
@@ -70,12 +70,19 @@ export default function Home() {
     }
   };
 
-  const submitTask = (event: FormEvent<HTMLFormElement>) => {
+  const submitTask = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!taskText.trim()) return;
 
     if (dispatchMode === 'live') {
-      setDispatchState('blocked');
+      setDispatchState('checking');
+      try {
+        const response = await fetch('/api/tg/health', { cache: 'no-store' });
+        const payload = await response.json() as { ok?: boolean; bridgeConfigured?: boolean };
+        setDispatchState(payload.ok ? 'verified' : 'blocked');
+      } catch {
+        setDispatchState('blocked');
+      }
       return;
     }
 
@@ -163,13 +170,15 @@ export default function Home() {
                 <button className={dispatchMode === 'test' ? 'selected' : ''} onClick={() => setDispatchMode('test')} type="button">測試佇列</button>
                 <button className={dispatchMode === 'live' ? 'selected live' : ''} onClick={() => setDispatchMode('live')} type="button">實際派送</button>
               </div>
-              <button className="send-button" type="submit">{dispatchMode === 'test' ? '送出測試命令' : '檢查實際連線'} <span>↗</span></button>
+              <button className="send-button" disabled={dispatchState === 'checking'} type="submit">{dispatchMode === 'test' ? '送出測試命令' : '檢查實際連線'} <span>↗</span></button>
             </div>
           </form>
           <div className={`dispatch-result ${dispatchState}`} role="status" aria-live="polite">
             {dispatchState === 'idle' && <><span className="result-icon">○</span><span>Ready / 等待命令</span><code>POST /tg/run</code></>}
             {dispatchState === 'queued' && <><span className="result-icon result-ok">✓</span><span><strong>Codex job queued</strong> / 測試回應</span><code>{dispatchJob}</code></>}
-            {dispatchState === 'blocked' && <><span className="result-icon result-warn">!</span><span><strong>Live dispatch blocked</strong> / 尚未設定安全連線</span><code>CONFIG_REQUIRED</code></>}
+            {dispatchState === 'checking' && <><span className="result-icon result-checking">◌</span><span><strong>Checking Telegram Bot</strong> / 正在驗證連線</span><code>GET /api/tg/health</code></>}
+            {dispatchState === 'verified' && <><span className="result-icon result-ok">✓</span><span><strong>Telegram Bot verified</strong> / Codex bridge 尚未設定</span><code>BRIDGE_REQUIRED</code></>}
+            {dispatchState === 'blocked' && <><span className="result-icon result-warn">!</span><span><strong>Live dispatch blocked</strong> / 請檢查 Bot 設定</span><code>CONFIG_REQUIRED</code></>}
           </div>
         </div>
       </section>
