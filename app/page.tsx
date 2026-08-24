@@ -127,7 +127,7 @@ export default function Home() {
   const [errorCopied, setErrorCopied] = useState(false);
   const [dispatchMode, setDispatchMode] = useState<'test' | 'live'>('test');
   const [dispatchFlow, setDispatchFlow] = useState<'single' | 'loop'>('loop');
-  const [taskText, setTaskText] = useState('修正 Telegram worker 在 job timeout 後沒有清除 lock 的問題。完成後執行 pytest，不要 push。');
+  const [taskText, setTaskText] = useState('');
   const [dispatchState, setDispatchState] = useState<DispatchState>('idle');
   const [dispatchJob, setDispatchJob] = useState('job-tg01-ready');
   const [dispatchCode, setDispatchCode] = useState('');
