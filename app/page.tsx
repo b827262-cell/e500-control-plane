@@ -100,6 +100,7 @@ type LifecycleQuery = {
 
 type WorkflowLightState = 'green' | 'progress' | 'red' | 'off';
 type WorkflowStage = 'gpt' | 'agy' | 'claude';
+type WebsiteView = 'frontend' | 'backend';
 
 const workflowStages: Array<{ key: WorkflowStage; label: string }> = [
   { key: 'gpt', label: 'GPT / CODEX' },
@@ -194,6 +195,7 @@ export default function Home() {
   const [dispatchSummary, setDispatchSummary] = useState('');
   const [lifecycleQuery, setLifecycleQuery] = useState<LifecycleQuery | null>(null);
   const [bridgeHealth, setBridgeHealth] = useState<BridgeHealthState>('checking');
+  const [websiteView, setWebsiteView] = useState<WebsiteView>('frontend');
   const pollingToken = useRef(0);
 
   const bridgeLabel = bridgeHealth === 'connected'
@@ -534,6 +536,16 @@ export default function Home() {
     }
   };
 
+  const startWebsiteDesign = () => {
+    setDispatchFlow('loop');
+    setDispatchMode('test');
+    setTaskText('設計一個可預覽的網站，完成後提供前台與後台畫面，並回報 build 結果。');
+    setDispatchState('idle');
+    setWorkflowId('');
+    setWorkflowState(null);
+    window.document.getElementById('tg-command')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
   return (
     <main className="site-shell">
       <div className="noise" aria-hidden="true" />
@@ -544,6 +556,7 @@ export default function Home() {
         </a>
         <nav className="nav-links" aria-label="主要導覽">
           <a href="#tg-command">TG 01</a>
+          <a href="#websites">網站</a>
           <a href="#architecture">架構</a>
           <a href="#lifecycle">生命週期</a>
           <a href="#commands">指令</a>
@@ -665,6 +678,40 @@ export default function Home() {
               <span className="workflow-light-content"><span className="workflow-light-title"><strong>REPORT / COMPLETION</strong><small>{workflowState.status === 'succeeded' ? '通過' : workflowState.status === 'failed' ? '失敗' : '進度回報'}</small></span><span className="workflow-progress-row"><span className="workflow-progress-track"><span style={{ width: `${getWorkflowCompletion(workflowState)}%` }} /></span><em>{getWorkflowCompletion(workflowState)}%</em></span></span>
             </div>
           </div>}
+        </div>
+      </section>
+
+      <section className="website-studio section-wrap" id="websites">
+        <div className="section-heading">
+          <div><p className="section-kicker">05 / WEBSITE STUDIO</p><h2>用 /gpt 設計，<br /><span>前台與後台都在這裡。</span></h2></div>
+          <p>網站完成後，不需要離開控制台。直接切換 customer-facing 前台、admin 後台與 API contract，從同一個 workflow 追蹤產物。</p>
+        </div>
+        <div className="website-toolbar">
+          <div className="website-tabs" role="tablist" aria-label="網站預覽切換">
+            <button className={websiteView === 'frontend' ? 'selected' : ''} onClick={() => setWebsiteView('frontend')} type="button" role="tab" aria-selected={websiteView === 'frontend'}>前台 / Frontend</button>
+            <button className={websiteView === 'backend' ? 'selected' : ''} onClick={() => setWebsiteView('backend')} type="button" role="tab" aria-selected={websiteView === 'backend'}>後台 / Backend</button>
+          </div>
+          <button className="website-action" onClick={startWebsiteDesign} type="button">＋ 使用 /gpt 建立網站 <span>↗</span></button>
+        </div>
+        <div className={`website-frame website-${websiteView}`}>
+          <div className="website-frame-top"><span className="frame-dots"><i /><i /><i /></span><code>preview.telegram-ai-code / {websiteView === 'frontend' ? 'home' : 'admin'}</code><span className="frame-live">LIVE PREVIEW</span></div>
+          {websiteView === 'frontend' ? (
+            <div className="website-frontend-preview">
+              <div className="preview-nav"><strong>NORTHSTAR</strong><span>Workflows</span><span>Agents</span><span>Docs</span><button type="button">Launch console ↗</button></div>
+              <div className="preview-hero"><span className="preview-kicker">SHIP WITH CLARITY</span><h3>From task to <em>working software.</em></h3><p>A calm workspace for directing coding agents, reviewing progress, and publishing with confidence.</p><div className="preview-cta"><button type="button">Start a workflow</button><span>See how it works →</span></div></div>
+              <div className="preview-stats"><div><strong>04</strong><span>agents ready</span></div><div><strong>99.2%</strong><span>build reliability</span></div><div><strong>24/7</strong><span>runtime visibility</span></div></div>
+            </div>
+          ) : (
+            <div className="website-backend-preview">
+              <aside className="preview-admin-nav"><strong>NORTHSTAR</strong><span className="active">Overview</span><span>Projects</span><span>Deployments</span><span>Team access</span><span>Settings</span></aside>
+              <div className="preview-admin-main"><div className="admin-heading"><div><span className="preview-kicker">SITE ADMIN</span><h3>Operations overview</h3></div><button type="button">＋ New deployment</button></div><div className="admin-metrics"><div><span>Published</span><strong>12</strong><small>↑ 18% this month</small></div><div><span>Build time</span><strong>42s</strong><small>↓ 8s from last run</small></div><div><span>API health</span><strong>99.9%</strong><small>All systems normal</small></div></div><div className="admin-activity"><div className="activity-head"><span>Recent activity</span><span>Status</span></div><div><span><strong>Website preview</strong><small>Generated by /gpt · 2 min ago</small></span><b className="admin-status good">Published</b></div><div><span><strong>Admin route</strong><small>Backend contract · 8 min ago</small></span><b className="admin-status progress">Building</b></div><div><span><strong>API routes</strong><small>/api/site · 12 min ago</small></span><b className="admin-status good">Healthy</b></div></div></div>
+            </div>
+          )}
+        </div>
+        <div className="website-contract" aria-label="網站輸出 contract">
+          <div><span>Frontend route</span><code>/</code><small>Customer-facing pages and public assets</small></div>
+          <div><span>Backend route</span><code>/admin</code><small>Content, deploy and runtime controls</small></div>
+          <div><span>API contract</span><code>/api/*</code><small>Same-origin BFF to generated services</small></div>
         </div>
       </section>
 
