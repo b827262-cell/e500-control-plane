@@ -1,25 +1,26 @@
 import { NextResponse } from 'next/server';
-import { coerceLogStage, coerceLogStatus, writeExecutionLogBestEffort } from '@/app/lib/execution-logs';
+import { queryExecutionLogs, writeExecutionLogOnceBestEffort } from '@/app/lib/execution-logs';
+import {
+  buildWorkflowDetail,
+  canonicalWorkflowStage,
+  extractOriginalTask,
+  hasReportSignal,
+  jobStatusForLog,
+  projectWorkflow,
+  workflowStageSource,
+  type WorkflowSnapshot,
+} from '@/app/lib/workflow-chain';
 
 type BridgeWorkflowResult = {
   ok?: boolean;
   code?: string;
   message?: string;
   error?: string | null;
-  workflow?: {
-    id?: string;
-    status?: string;
-    current_stage?: string | null;
-    error?: string | null;
-    jobs?: Array<{
-      id?: string;
-      workflow_id?: string | null;
-      workflow_stage?: string | null;
-      status?: string;
-      error?: string | null;
-      report?: { summary?: string } | null;
-    }>;
-  };
+  workflow?: WorkflowSnapshot;
+};
+
+type ProjectedWorkflow = WorkflowSnapshot & {
+  completion: ReturnType<typeof projectWorkflow>['completion'];
 };
 
 export async function GET(
@@ -31,7 +32,7 @@ export async function GET(
   const { workflowId } = await context.params;
 
   if (!bridgeUrl || !bridgeToken || !workflowId) {
-    await writeExecutionLogBestEffort({
+    await writeExecutionLogOnceBestEffort({
       workflow_id: workflowId,
       stage: 'workflow',
       status: 'blocked',
@@ -53,38 +54,121 @@ export async function GET(
     const payload = await response.json() as BridgeWorkflowResult;
     const ok = response.ok && payload.ok !== false;
     const workflow = payload.workflow;
-    const stage = coerceLogStage(workflow?.current_stage, 'workflow');
-    const source = stage === 'agy' ? 'agy' : stage === 'claude' ? 'claude' : 'workflow';
-    await writeExecutionLogBestEffort({
-      workflow_id: workflow?.id || workflowId,
-      stage,
-      status: ok ? coerceLogStatus(workflow?.status, 'running') : 'failed',
-      level: ok ? 'info' : 'error',
-      source,
-      message: ok ? `Workflow ${workflow?.status || 'running'}` : (payload.error || payload.message || payload.code || 'Workflow result query failed'),
-      detail: workflow?.error || null,
+    const projection = workflow ? projectWorkflow(workflow) : {
+      status: 'failed' as const,
+      currentStage: 'workflow',
+      completion: {
+        codex: 'failed' as const,
+        agy: 'queued' as const,
+        claude: 'queued' as const,
+        report: 'queued' as const,
+        all_succeeded: false,
+        needs_attention: true,
+        percentage: 0,
+      },
+      reportStatus: null,
+      reportFailure: null,
+    };
+    const resolvedWorkflowId = workflow?.id || workflowId;
+    let originalTask: string | null = null;
+    try {
+      const priorCodexLogs = await queryExecutionLogs({ workflowId: resolvedWorkflowId, stage: 'codex', limit: 100 });
+      originalTask = priorCodexLogs.map((log) => extractOriginalTask(log.detail)).find(Boolean) || null;
+    } catch {
+      // The lifecycle response remains useful even when context lookup is unavailable.
+    }
+
+    await writeExecutionLogOnceBestEffort({
+      workflow_id: resolvedWorkflowId,
+      stage: 'workflow',
+      status: ok ? projection.status : 'failed',
+      level: ok && projection.status !== 'failed' ? 'info' : 'error',
+      source: 'workflow',
+      message: ok ? `Workflow ${projection.status}` : (payload.error || payload.message || payload.code || 'Workflow result query failed'),
+      detail: buildWorkflowDetail({
+        workflowId: resolvedWorkflowId,
+        originalTask,
+        error: workflow?.error || payload.error || payload.message,
+        extra: {
+          current_stage: projection.currentStage,
+          completion: projection.completion,
+        },
+      }),
     });
+
     for (const job of workflow?.jobs || []) {
-      await writeExecutionLogBestEffort({
+      const stage = canonicalWorkflowStage(job.workflow_stage, canonicalWorkflowStage(workflow?.current_stage, 'codex'));
+      if (stage === 'report') continue;
+      const status = jobStatusForLog(workflow || {}, stage);
+      await writeExecutionLogOnceBestEffort({
         job_id: job.id,
-        workflow_id: job.workflow_id || workflow?.id || workflowId,
-        stage: coerceLogStage(job.workflow_stage, stage),
-        status: coerceLogStatus(job.status, ok ? 'running' : 'failed'),
-        level: job.status?.toLowerCase() === 'failed' || job.error ? 'error' : 'info',
-        source: job.workflow_stage?.toLowerCase() === 'agy' ? 'agy' : job.workflow_stage?.toLowerCase() === 'claude' ? 'claude' : 'workflow',
-        message: job.error || `Workflow ${job.workflow_stage || stage} ${job.status || 'running'}`,
-        detail: job.report?.summary || null,
+        workflow_id: job.workflow_id || resolvedWorkflowId,
+        stage,
+        status,
+        level: status === 'failed' ? 'error' : status === 'blocked' ? 'warn' : 'info',
+        source: workflowStageSource(stage),
+        message: `${stage === 'codex' ? 'GPT / Codex' : stage.toUpperCase()} ${status}`,
+        detail: buildWorkflowDetail({
+          workflowId: job.workflow_id || resolvedWorkflowId,
+          jobId: job.id,
+          originalTask,
+          report: job.report,
+          error: job.error,
+        }),
       });
+    }
+
+    if (projection.reportStatus && (hasReportSignal(workflow || {}) || projection.reportStatus === 'failed' || projection.reportStatus === 'blocked')) {
+      await writeExecutionLogOnceBestEffort({
+        workflow_id: resolvedWorkflowId,
+        stage: 'report',
+        status: projection.reportStatus,
+        level: projection.reportStatus === 'failed' ? 'error' : 'info',
+        source: 'github',
+        message: projection.reportStatus === 'succeeded'
+          ? 'GitHub Markdown report created'
+          : projection.reportFailure || `GitHub Markdown report ${projection.reportStatus}`,
+        detail: buildWorkflowDetail({
+          workflowId: resolvedWorkflowId,
+          originalTask,
+          report: {
+            github_url: workflow?.github_url,
+            github_status: workflow?.github_status,
+            report_path: workflow?.report_path,
+            commit_sha: workflow?.commit_sha,
+          },
+          error: projection.reportFailure,
+          extra: {
+            report_path: workflow?.report_path || `reports/${resolvedWorkflowId}.md`,
+            commit_sha: workflow?.commit_sha || null,
+            github_url: workflow?.github_url || null,
+          },
+        }),
+      });
+    }
+
+    if (workflow) {
+      const normalizedWorkflow: ProjectedWorkflow = {
+        ...workflow,
+        id: resolvedWorkflowId,
+        status: ok ? projection.status : 'failed',
+        current_stage: projection.currentStage,
+        github_status: projection.reportStatus || workflow.github_status,
+        error: workflow.error || projection.reportFailure,
+        completion: projection.completion,
+      };
+      payload.workflow = normalizedWorkflow;
     }
     return NextResponse.json(payload, { status: response.status });
   } catch (error) {
-    await writeExecutionLogBestEffort({
+    await writeExecutionLogOnceBestEffort({
       workflow_id: workflowId,
       stage: 'workflow',
       status: 'failed',
       level: 'error',
       source: 'control-plane',
       message: error instanceof Error ? error.message : 'Workflow result request failed',
+      detail: `flow_id=${workflowId}; query=/workflow ${workflowId}`,
     });
     return NextResponse.json(
       { ok: false, code: 'BRIDGE_UNREACHABLE' },

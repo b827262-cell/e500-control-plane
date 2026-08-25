@@ -20,6 +20,10 @@ export const executionLogsJobIndexSql = `
 CREATE INDEX IF NOT EXISTS idx_execution_logs_job_created_at
 ON execution_logs(job_id, created_at DESC)`;
 
+export const executionLogsChainIndexSql = `
+CREATE INDEX IF NOT EXISTS idx_execution_logs_chain_event
+ON execution_logs(workflow_id, stage, status, source, created_at DESC)`;
+
 export const executionLogsSeedSql = `
 INSERT INTO execution_logs (
   job_id,

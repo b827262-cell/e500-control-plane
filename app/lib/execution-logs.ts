@@ -3,6 +3,7 @@ import type { D1Database } from '@cloudflare/workers-types';
 import {
   executionLogsJobIndexSql,
   executionLogsCurrentFailureSeedSql,
+  executionLogsChainIndexSql,
   executionLogsSeedSql,
   executionLogsTableSql,
   executionLogsWorkflowIndexSql,
@@ -10,7 +11,7 @@ import {
 
 export const LOG_STATUSES = ['queued', 'running', 'succeeded', 'failed', 'blocked'] as const;
 export const LOG_LEVELS = ['info', 'warn', 'error'] as const;
-export const LOG_SOURCES = ['controller', 'codex', 'agy', 'claude', 'workflow', 'telegram', 'control-plane'] as const;
+export const LOG_SOURCES = ['controller', 'codex', 'agy', 'claude', 'workflow', 'telegram', 'control-plane', 'github'] as const;
 
 export type ExecutionLogStatus = (typeof LOG_STATUSES)[number];
 export type ExecutionLogLevel = (typeof LOG_LEVELS)[number];
@@ -47,7 +48,7 @@ const logIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 const logStagePattern = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const sensitivePatterns = [
   /Bearer\s+[A-Za-z0-9._~+/=-]+/gi,
-  /Authorization\s*:\s*[^\r\n]+/gi,
+  /Authorization\s*:\s*[^\s,"'}]+/gi,
   /["']?(?:Authorization|TELEGRAM_BOT_TOKEN|TELEGRAM_TOKEN|CODEX_BRIDGE_API_TOKEN|BRIDGE_TOKEN|OPENAI_API_KEY|token|secret|api[_-]?key|password)["']?\s*[:=]\s*["']?[^\s,"'}]+["']?/gi,
   /\b(?:TELEGRAM_BOT_TOKEN|TELEGRAM_TOKEN|CODEX_BRIDGE_API_TOKEN|BRIDGE_TOKEN|OPENAI_API_KEY)\s*[:=]\s*[^\s,;]+/gi,
   /\b(?:token|secret|api[_-]?key|password)\s*[:=]\s*[^\s,;]+/gi,
@@ -131,6 +132,7 @@ async function ensureExecutionLogSchema(db: D1Database): Promise<void> {
     db.prepare(executionLogsTableSql),
     db.prepare(executionLogsWorkflowIndexSql),
     db.prepare(executionLogsJobIndexSql),
+    db.prepare(executionLogsChainIndexSql),
     db.prepare(executionLogsSeedSql),
     db.prepare(executionLogsCurrentFailureSeedSql),
     db.prepare('PRAGMA optimize'),
@@ -142,34 +144,80 @@ async function ensureExecutionLogSchema(db: D1Database): Promise<void> {
   return pending;
 }
 
-export async function writeExecutionLog(input: ExecutionLogInput): Promise<boolean> {
+type NormalizedExecutionLog = {
+  jobId: string | null;
+  workflowId: string | null;
+  stage: string;
+  status: ExecutionLogStatus;
+  level: ExecutionLogLevel;
+  source: ExecutionLogSource;
+  message: string;
+  detail: string | null;
+};
+
+function normalizeExecutionLog(input: ExecutionLogInput): NormalizedExecutionLog {
+  const jobId = normalizeLogId(input.job_id, 'job_id');
+  const workflowId = normalizeLogId(input.workflow_id, 'workflow_id');
+  const stage = normalizeLogStage(input.stage);
+  const status = normalizeLogStatus(input.status);
+  const level = normalizeLogLevel(input.level);
+  const source = normalizeLogSource(input.source);
+  const message = redactLogText(input.message, 1200);
+  if (!message) throw new LogInputError('message 不可為空');
+  const detail = input.detail === undefined || input.detail === null ? null : redactLogText(input.detail);
+  return { jobId, workflowId, stage, status, level, source, message, detail };
+}
+
+async function insertExecutionLog(db: D1Database, normalized: NormalizedExecutionLog): Promise<void> {
+  await db.prepare(`
+    INSERT INTO execution_logs
+      (job_id, workflow_id, stage, status, level, source, message, detail, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    normalized.jobId,
+    normalized.workflowId,
+    normalized.stage,
+    normalized.status,
+    normalized.level,
+    normalized.source,
+    normalized.message,
+    normalized.detail,
+    new Date().toISOString(),
+  ).run();
+}
+
+async function writeExecutionLogInternal(input: ExecutionLogInput, deduplicate: boolean): Promise<boolean> {
   try {
     const db = database();
     await ensureExecutionLogSchema(db);
-    const jobId = normalizeLogId(input.job_id, 'job_id');
-    const workflowId = normalizeLogId(input.workflow_id, 'workflow_id');
-    const stage = normalizeLogStage(input.stage);
-    const status = normalizeLogStatus(input.status);
-    const level = normalizeLogLevel(input.level);
-    const source = normalizeLogSource(input.source);
-    const message = redactLogText(input.message, 1200);
-    if (!message) throw new LogInputError('message 不可為空');
-    const detail = input.detail === undefined || input.detail === null ? null : redactLogText(input.detail);
-    await db.prepare(`
-      INSERT INTO execution_logs
-        (job_id, workflow_id, stage, status, level, source, message, detail, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(
-      jobId,
-      workflowId,
-      stage,
-      status,
-      level,
-      source,
-      message,
-      detail,
-      new Date().toISOString(),
-    ).run();
+    const normalized = normalizeExecutionLog(input);
+    if (deduplicate) {
+      const existing = await db.prepare(`
+        SELECT id
+        FROM execution_logs
+        WHERE ((job_id = ? AND ? IS NOT NULL) OR (job_id IS NULL AND ? IS NULL))
+          AND ((workflow_id = ? AND ? IS NOT NULL) OR (workflow_id IS NULL AND ? IS NULL))
+          AND stage = ?
+          AND status = ?
+          AND level = ?
+          AND source = ?
+          AND message = ?
+          AND ((detail = ? AND ? IS NOT NULL) OR (detail IS NULL AND ? IS NULL))
+        ORDER BY id DESC
+        LIMIT 1
+      `).bind(
+        normalized.jobId, normalized.jobId, normalized.jobId,
+        normalized.workflowId, normalized.workflowId, normalized.workflowId,
+        normalized.stage,
+        normalized.status,
+        normalized.level,
+        normalized.source,
+        normalized.message,
+        normalized.detail, normalized.detail, normalized.detail,
+      ).first<{ id: number }>();
+      if (existing) return true;
+    }
+    await insertExecutionLog(db, normalized);
     return true;
   } catch (error) {
     if (error instanceof LogInputError) throw error;
@@ -178,9 +226,25 @@ export async function writeExecutionLog(input: ExecutionLogInput): Promise<boole
   }
 }
 
+export async function writeExecutionLog(input: ExecutionLogInput): Promise<boolean> {
+  return writeExecutionLogInternal(input, false);
+}
+
+export async function writeExecutionLogOnce(input: ExecutionLogInput): Promise<boolean> {
+  return writeExecutionLogInternal(input, true);
+}
+
 export async function writeExecutionLogBestEffort(input: ExecutionLogInput): Promise<boolean> {
   try {
     return await writeExecutionLog(input);
+  } catch {
+    return false;
+  }
+}
+
+export async function writeExecutionLogOnceBestEffort(input: ExecutionLogInput): Promise<boolean> {
+  try {
+    return await writeExecutionLogOnce(input);
   } catch {
     return false;
   }

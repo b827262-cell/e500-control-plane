@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
-import { coerceLogStage, coerceLogStatus, writeExecutionLogBestEffort } from '@/app/lib/execution-logs';
+import { coerceLogStatus, writeExecutionLogOnceBestEffort } from '@/app/lib/execution-logs';
+import { buildWorkflowDetail, canonicalWorkflowStage, type WorkflowReport } from '@/app/lib/workflow-chain';
 
 type BridgeJobResult = {
   ok?: boolean;
@@ -11,7 +12,7 @@ type BridgeJobResult = {
     workflow_stage?: string | null;
     status?: string;
     error?: string | null;
-    report?: { summary?: string } | null;
+    report?: WorkflowReport | null;
   };
   error?: string | null;
 };
@@ -25,7 +26,7 @@ export async function GET(
   const { jobId } = await context.params;
 
   if (!bridgeUrl || !bridgeToken || !jobId) {
-    await writeExecutionLogBestEffort({
+    await writeExecutionLogOnceBestEffort({
       job_id: jobId,
       stage: 'codex',
       status: 'blocked',
@@ -46,19 +47,26 @@ export async function GET(
     });
     const payload = await response.json() as BridgeJobResult;
     const ok = response.ok && payload.ok !== false;
-    await writeExecutionLogBestEffort({
+    const stage = canonicalWorkflowStage(payload.job?.workflow_stage, 'codex');
+    const status = ok ? coerceLogStatus(payload.job?.status, 'running') : 'failed';
+    await writeExecutionLogOnceBestEffort({
       job_id: payload.job?.id || jobId,
       workflow_id: payload.job?.workflow_id,
-      stage: coerceLogStage(payload.job?.workflow_stage, 'codex'),
-      status: ok ? coerceLogStatus(payload.job?.status, 'running') : 'failed',
+      stage,
+      status,
       level: ok ? 'info' : 'error',
       source: 'codex',
-      message: ok ? `Codex job ${payload.job?.status || 'running'}` : (payload.error || payload.message || payload.code || 'Codex result query failed'),
-      detail: payload.job?.error || payload.job?.report?.summary || null,
+      message: ok ? `GPT / Codex ${status}` : (payload.error || payload.message || payload.code || 'Codex result query failed'),
+      detail: buildWorkflowDetail({
+        workflowId: payload.job?.workflow_id,
+        jobId: payload.job?.id || jobId,
+        report: payload.job?.report,
+        error: payload.job?.error || payload.error,
+      }),
     });
     return NextResponse.json(payload, { status: response.status });
   } catch (error) {
-    await writeExecutionLogBestEffort({
+    await writeExecutionLogOnceBestEffort({
       job_id: jobId,
       stage: 'codex',
       status: 'failed',

@@ -107,12 +107,22 @@ type WorkflowJobPayload = {
 };
 
 type WorkflowPayload = {
+  id?: string;
   status?: string;
   current_stage?: string;
   github_url?: string | null;
   github_status?: string | null;
   error?: string | null;
   jobs?: WorkflowJobPayload[];
+  completion?: {
+    codex?: string;
+    agy?: string;
+    claude?: string;
+    report?: string;
+    all_succeeded?: boolean;
+    needs_attention?: boolean;
+    percentage?: number;
+  };
 };
 
 type LifecycleQuery = {
@@ -163,6 +173,12 @@ type PipelineNodeState = 'idle' | 'active' | 'done' | 'failed';
 
 function getPipelineNodeState(workflow: WorkflowPayload | null, node: PipelineNodeKey): PipelineNodeState {
   if (!workflow) return 'idle';
+  const completionKey = node === 'gpt' ? 'codex' : node;
+  const completionStatus = completionKey === 'telegram' || completionKey === 'controller'
+    ? undefined
+    : workflow.completion?.[completionKey as 'codex' | 'agy' | 'claude' | 'report'];
+  if (completionStatus === 'failed' || completionStatus === 'blocked') return 'failed';
+  if (completionStatus === 'succeeded') return 'done';
   const currentStage = workflow.current_stage?.toLowerCase();
   const status = workflow.status?.toLowerCase();
   const nodeIndex: Record<PipelineNodeKey, number> = {
@@ -190,6 +206,7 @@ function getPipelineNodeState(workflow: WorkflowPayload | null, node: PipelineNo
 
 function getWorkflowCompletion(workflow: WorkflowPayload | null): number {
   if (!workflow) return 0;
+  if (typeof workflow.completion?.percentage === 'number') return workflow.completion.percentage;
   if (workflow.status?.toLowerCase() === 'succeeded') return 100;
   if (workflow.current_stage?.toLowerCase() === 'github') return 95;
   const completed = (workflow.jobs || []).filter((job) => {
@@ -202,6 +219,10 @@ function getWorkflowCompletion(workflow: WorkflowPayload | null): number {
 }
 
 function getWorkflowLight(workflow: WorkflowPayload | null, stage: WorkflowStage): WorkflowLightState {
+  const completionStatus = workflow?.completion?.[stage === 'gpt' ? 'codex' : stage];
+  if (completionStatus === 'succeeded') return 'green';
+  if (completionStatus === 'failed' || completionStatus === 'blocked') return 'red';
+  if (completionStatus === 'queued' || completionStatus === 'running') return 'progress';
   const job = workflow?.jobs?.find((item) => item.workflow_stage?.toLowerCase() === stage);
   const status = job?.status?.toLowerCase();
   if (workflow?.status === 'failed' && workflow.current_stage?.toLowerCase() === stage) return 'red';
@@ -213,6 +234,8 @@ function getWorkflowLight(workflow: WorkflowPayload | null, stage: WorkflowStage
 }
 
 function getWorkflowProgress(workflow: WorkflowPayload | null, stage: WorkflowStage): number {
+  const completionStatus = workflow?.completion?.[stage === 'gpt' ? 'codex' : stage];
+  if (completionStatus === 'succeeded') return 100;
   const job = workflow?.jobs?.find((item) => item.workflow_stage?.toLowerCase() === stage);
   if (typeof job?.progress === 'number' && Number.isFinite(job.progress)) {
     return Math.max(0, Math.min(100, Math.round(job.progress)));
