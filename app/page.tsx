@@ -100,6 +100,49 @@ const workflowLightLabels: Record<WorkflowLightState, string> = {
   off: '等待',
 };
 
+type PipelineNodeKey = 'telegram' | 'controller' | 'gpt' | 'agy' | 'claude' | 'report';
+type PipelineNodeState = 'idle' | 'active' | 'done' | 'failed';
+
+function getPipelineNodeState(workflow: WorkflowPayload | null, node: PipelineNodeKey): PipelineNodeState {
+  if (!workflow) return 'idle';
+  const currentStage = workflow.current_stage?.toLowerCase();
+  const status = workflow.status?.toLowerCase();
+  const nodeIndex: Record<PipelineNodeKey, number> = {
+    telegram: 0,
+    controller: 1,
+    gpt: 2,
+    agy: 3,
+    claude: 4,
+    report: 5,
+  };
+  const currentIndex = currentStage === 'agy'
+    ? 3
+    : currentStage === 'claude'
+      ? 4
+      : currentStage === 'github'
+        ? 5
+        : 2;
+  const index = nodeIndex[node];
+  const isFailedNode = status === 'failed' && ((currentStage === node) || (node === 'report' && currentStage === 'github'));
+  if (isFailedNode) return 'failed';
+  if (status === 'succeeded' || index < currentIndex) return 'done';
+  if (index === currentIndex) return 'active';
+  return 'idle';
+}
+
+function getWorkflowCompletion(workflow: WorkflowPayload | null): number {
+  if (!workflow) return 0;
+  if (workflow.status?.toLowerCase() === 'succeeded') return 100;
+  if (workflow.current_stage?.toLowerCase() === 'github') return 95;
+  const completed = (workflow.jobs || []).filter((job) => {
+    const status = job.status?.toLowerCase();
+    return status === 'succeeded' || status === 'completed' || status === 'success';
+  }).length;
+  const currentStage = workflow.current_stage?.toLowerCase();
+  const inProgress = currentStage === 'gpt' || currentStage === 'agy' || currentStage === 'claude' ? .5 : 0;
+  return Math.min(99, Math.round(((completed + inProgress) / 3) * 100));
+}
+
 function getWorkflowLight(workflow: WorkflowPayload | null, stage: WorkflowStage): WorkflowLightState {
   const job = workflow?.jobs?.find((item) => item.workflow_stage?.toLowerCase() === stage);
   const status = job?.status?.toLowerCase();
@@ -537,6 +580,10 @@ export default function Home() {
                 </div>;
               })}
             </div>
+            <div className={`workflow-completion-strip ${getPipelineNodeState(workflowState, 'report')}`} aria-label={`回報完成度 ${getWorkflowCompletion(workflowState)}%`}>
+              <span className="completion-box">06</span>
+              <span className="workflow-light-content"><span className="workflow-light-title"><strong>REPORT / COMPLETION</strong><small>{workflowState.status === 'succeeded' ? '通過' : workflowState.status === 'failed' ? '失敗' : '進度回報'}</small></span><span className="workflow-progress-row"><span className="workflow-progress-track"><span style={{ width: `${getWorkflowCompletion(workflowState)}%` }} /></span><em>{getWorkflowCompletion(workflowState)}%</em></span></span>
+            </div>
           </div>}
         </div>
       </section>
@@ -544,13 +591,15 @@ export default function Home() {
       <section className="architecture section-wrap" id="architecture">
         <div className="section-heading">
           <div><p className="section-kicker">01 / SYSTEM MAP</p><h2>一條清楚的主線，<br />把複雜度留在幕後。</h2></div>
-          <p>第一階段只做一件事：讓 Telegram → job → Codex → result → Telegram 穩定閉環。其他模型先保留在下一個階段。</p>
+          <p>loop 會依序通過 GPT → AGY → Claude，最後回報完成度與 GitHub 報告；每個階段都能看見目前進度。</p>
         </div>
-        <div className="pipeline" role="img" aria-label="Telegram 到 Codex 再回到 Telegram 的任務流程">
-          <div className="pipeline-node telegram"><span className="node-index">01</span><span className="node-icon">TG</span><strong>Telegram</strong><small>你的入口</small></div><Arrow />
-          <div className="pipeline-node controller"><span className="node-index">02</span><span className="node-icon">◈</span><strong>Controller</strong><small>權限 · queue · job_id</small></div><Arrow />
-          <div className="pipeline-node codex"><span className="node-index">03</span><span className="node-icon">CX</span><strong>Codex</strong><small>repo · code · tests</small></div><Arrow />
-          <div className="pipeline-node result"><span className="node-index">04</span><span className="node-icon">↺</span><strong>Result</strong><small>summary · diff · status</small></div>
+        <div className="pipeline" role="img" aria-label="Telegram、Controller、GPT、AGY、Claude 到回報完成度的任務流程">
+          <div className={`pipeline-node telegram ${getPipelineNodeState(workflowState, 'telegram')}`}><span className="node-index">01</span><span className="node-icon">TG</span><strong>Telegram</strong><small>你的入口</small></div><Arrow />
+          <div className={`pipeline-node controller ${getPipelineNodeState(workflowState, 'controller')}`}><span className="node-index">02</span><span className="node-icon">◈</span><strong>Controller</strong><small>權限 · queue · job_id</small></div><Arrow />
+          <div className={`pipeline-node codex ${getPipelineNodeState(workflowState, 'gpt')}`}><span className="node-index">03</span><span className="node-icon">CX</span><strong>GPT / Codex</strong><small>repo · code · tests</small></div><Arrow />
+          <div className={`pipeline-node agy ${getPipelineNodeState(workflowState, 'agy')}`}><span className="node-index">04</span><span className="node-icon">AG</span><strong>AGY</strong><small>review · verify</small></div><Arrow />
+          <div className={`pipeline-node claude ${getPipelineNodeState(workflowState, 'claude')}`}><span className="node-index">05</span><span className="node-icon">CL</span><strong>Claude</strong><small>final · refine</small></div><Arrow />
+          <div className={`pipeline-node report ${getPipelineNodeState(workflowState, 'report')}`}><span className="node-index">06</span><span className="node-icon">↺</span><strong>回報完成度</strong><small>{workflowId ? `${getWorkflowCompletion(workflowState)}% · summary · GitHub` : 'summary · diff · status'}</small></div>
         </div>
         <div className="architecture-caption"><span className="caption-line" /><span>One source of truth</span><span className="caption-line caption-line-short" /><span className="muted-caption">所有狀態都能被查詢、取消、回看</span></div>
       </section>

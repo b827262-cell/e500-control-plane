@@ -102,3 +102,41 @@ button { font: inherit; }
 .traffic-key.progress, .traffic-light.progress i { background: #fff; box-shadow: 0 0 9px rgba(255,255,255,.75), 0 0 18px rgba(255,255,255,.4); animation: traffic-pulse 1.05s ease-in-out infinite; }.workflow-light-content { display: block; min-width: 0; flex: 1; }.workflow-light-title { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }.workflow-light-title small { margin-top: 0; color: #fff; }.workflow-progress-row { display: flex; align-items: center; gap: 7px; margin-top: 7px; }.workflow-progress-track { display: block; flex: 1; height: 4px; overflow: hidden; border: 1px solid rgba(166,188,190,.25); background: rgba(255,255,255,.06); }.workflow-progress-track > span { display: block; height: 100%; background: #fff; box-shadow: 0 0 8px rgba(255,255,255,.55); transition: width .35s ease; }.workflow-light-card .traffic-light.green ~ .workflow-light-content .workflow-progress-track > span { background: var(--green); box-shadow: 0 0 8px rgba(182,243,109,.55); }.workflow-light-card .traffic-light.red ~ .workflow-light-content .workflow-progress-track > span { background: var(--red); box-shadow: 0 0 8px rgba(255,136,122,.55); }.workflow-progress-row em { min-width: 28px; color: #9aa7a9; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; font-style: normal; text-align: right; }
 
 @keyframes traffic-pulse { 0%, 100% { opacity: .38; transform: scale(.82); } 50% { opacity: 1; transform: scale(1.08); } }
+
+/* Loop pipeline: show the active stage in its square marker. */
+.pipeline { grid-template-columns: repeat(5, minmax(0, 1fr) auto) minmax(0, 1fr); gap: 13px; }
+.pipeline-node { min-width: 0; }
+.pipeline-node small { white-space: normal; }
+.pipeline-node.agy { --node-color: #f1c66b; }
+.pipeline-node.claude { --node-color: #e5a8ff; }
+.pipeline-node.report { --node-color: var(--green); }
+.pipeline-node.active { border-color: color-mix(in srgb, var(--node-color) 58%, transparent); }
+.pipeline-node.active .node-index, .pipeline-node.done .node-index { color: var(--node-color); }
+.pipeline-node.active .node-icon { animation: pipeline-box-blink 1.05s ease-in-out infinite; background: color-mix(in srgb, var(--node-color) 13%, transparent); }
+.pipeline-node.done .node-icon { background: color-mix(in srgb, var(--node-color) 10%, transparent); box-shadow: 0 0 11px color-mix(in srgb, var(--node-color) 35%, transparent); }
+.pipeline-node.failed { border-color: rgba(255,136,122,.62); --node-color: var(--red); }
+.pipeline-node.failed .node-icon { animation: pipeline-box-blink 1.05s ease-in-out infinite; background: rgba(255,136,122,.12); }
+@keyframes pipeline-box-blink { 0%, 100% { opacity: .52; box-shadow: 0 0 0 color-mix(in srgb, var(--node-color) 0%, transparent); } 50% { opacity: 1; box-shadow: 0 0 22px color-mix(in srgb, var(--node-color) 70%, transparent); } }
+
+.workflow-completion-strip { display: flex; align-items: center; gap: 10px; margin-top: 8px; padding: 9px 10px; border: 1px solid var(--line); background: rgba(255,255,255,.015); }
+.completion-box { display: grid; place-items: center; flex: 0 0 28px; width: 28px; height: 28px; border: 1px solid #3a474e; color: #718086; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.workflow-completion-strip.active .completion-box { border-color: var(--green); color: var(--green); animation: pipeline-box-blink 1.05s ease-in-out infinite; }
+.workflow-completion-strip.done .completion-box { border-color: var(--green); color: var(--green); background: rgba(182,243,109,.1); box-shadow: 0 0 11px rgba(182,243,109,.35); }
+.workflow-completion-strip.failed .completion-box { border-color: var(--red); color: var(--red); animation: pipeline-box-blink 1.05s ease-in-out infinite; }
+.workflow-completion-strip .workflow-progress-track > span { background: var(--green); box-shadow: 0 0 8px rgba(182,243,109,.55); }
+
+@media (max-width: 900px) {
+  .pipeline { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .pipeline-arrow { display: none; }
+}
+
+@media (max-width: 620px) {
+  .pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .pipeline-node { min-height: 145px; padding: 18px 14px; }
+  .pipeline-node strong { font-size: 13px; }
+  .pipeline-node small { font-size: 9px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pipeline-node.active .node-icon, .pipeline-node.failed .node-icon, .workflow-completion-strip.active .completion-box, .workflow-completion-strip.failed .completion-box { animation: none; }
+}
