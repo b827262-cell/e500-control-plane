@@ -140,3 +140,22 @@ button { font: inherit; }
 @media (prefers-reduced-motion: reduce) {
   .pipeline-node.active .node-icon, .pipeline-node.failed .node-icon, .workflow-completion-strip.active .completion-box, .workflow-completion-strip.failed .completion-box { animation: none; }
 }
+
+.lifecycle-query-button { display: inline-flex; align-items: center; gap: 8px; border: 0; padding: 0; background: transparent; color: var(--card-color); cursor: pointer; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .06em; }
+.lifecycle-query-button:hover { color: var(--ink); }
+.lifecycle-query-button span { color: inherit; font-size: 14px; }
+.lifecycle-log-panel { margin-top: 18px; padding: 18px 20px; border: 1px solid rgba(182,243,109,.28); background: linear-gradient(145deg, rgba(19, 35, 29, .55), rgba(12, 20, 23, .72)); }
+.lifecycle-log-panel.error { border-color: rgba(255,136,122,.42); background: rgba(53, 24, 26, .34); }
+.lifecycle-log-head { display: flex; align-items: center; justify-content: space-between; gap: 15px; }
+.lifecycle-log-head .section-kicker { margin: 0 0 7px; color: var(--green); }
+.lifecycle-log-head strong { color: #dce7e1; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 500; }
+.lifecycle-log-close { border: 1px solid var(--line-strong); padding: 6px 9px; background: rgba(255,255,255,.025); color: #9ba8aa; cursor: pointer; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.lifecycle-log-close:hover { border-color: var(--green); color: var(--green); }
+.lifecycle-log-lines { display: grid; gap: 7px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.lifecycle-log-lines code { color: #a7b7b2; font: 10px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+.lifecycle-log-panel.error .lifecycle-log-lines code { color: #f0aaa0; }
+
+@media (max-width: 620px) {
+  .lifecycle-log-head { align-items: flex-start; flex-direction: column; }
+  .lifecycle-log-close { align-self: flex-end; margin-top: -35px; }
+}

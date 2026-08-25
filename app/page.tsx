@@ -4,7 +4,9 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 
 const command = '/run 修正 Telegram worker 的 timeout lock cleanup，完成後執行 pytest，不要 push。';
 
-const lifecycle = [
+type LifecycleKey = 'queued' | 'running' | 'succeeded' | 'failed';
+
+const lifecycle: Array<{ key: LifecycleKey; number: string; label: string; title: string; detail: string; color: string }> = [
   {
     key: 'queued',
     number: '01',
@@ -70,9 +72,14 @@ type JobPayload = {
 };
 
 type WorkflowJobPayload = {
+  id?: string;
   workflow_stage?: string | null;
   status?: string;
   progress?: number | null;
+  error?: string | null;
+  report?: {
+    summary?: string;
+  } | null;
 };
 
 type WorkflowPayload = {
@@ -82,6 +89,13 @@ type WorkflowPayload = {
   github_status?: string | null;
   error?: string | null;
   jobs?: WorkflowJobPayload[];
+};
+
+type LifecycleQuery = {
+  key: LifecycleKey;
+  loading: boolean;
+  lines: string[];
+  error?: boolean;
 };
 
 type WorkflowLightState = 'green' | 'progress' | 'red' | 'off';
@@ -178,6 +192,7 @@ export default function Home() {
   const [workflowState, setWorkflowState] = useState<WorkflowPayload | null>(null);
   const [dispatchProgress, setDispatchProgress] = useState<DispatchPhase[]>([]);
   const [dispatchSummary, setDispatchSummary] = useState('');
+  const [lifecycleQuery, setLifecycleQuery] = useState<LifecycleQuery | null>(null);
   const [bridgeHealth, setBridgeHealth] = useState<BridgeHealthState>('checking');
   const pollingToken = useRef(0);
 
@@ -384,6 +399,7 @@ export default function Home() {
     setDispatchCode('');
     setDispatchProgress([]);
     setDispatchSummary('');
+    setLifecycleQuery(null);
 
     if (dispatchMode === 'live') {
       setDispatchState('checking');
@@ -452,6 +468,70 @@ export default function Home() {
     setDispatchSummary(dispatchFlow === 'loop'
       ? '測試模式只模擬 GPT → AGY → Claude queue，不會呼叫 Codex Bridge。'
       : '測試模式只模擬 queue，不會呼叫 Codex Bridge。');
+  };
+
+  const queryLifecycle = async (key: LifecycleKey) => {
+    setLifecycleQuery({ key, loading: true, lines: ['正在查詢 Bridge log snapshot…'] });
+    try {
+      if (workflowId) {
+        const response = await fetch(`/api/tg/workflow/${encodeURIComponent(workflowId)}`, { cache: 'no-store' });
+        const payload = await response.json() as { ok?: boolean; error?: string; workflow?: WorkflowPayload };
+        if (!response.ok || !payload.ok || !payload.workflow) {
+          throw new Error(payload.error || `HTTP ${response.status}`);
+        }
+        const workflow = payload.workflow;
+        setWorkflowState(workflow);
+        const lines = [
+          `scope=workflow`,
+          `workflow=${workflowId}`,
+          `status=${workflow.status || 'unknown'}`,
+          `current_stage=${workflow.current_stage || 'unknown'}`,
+          ...(workflow.jobs || []).map((job) => {
+            const stage = (job.workflow_stage || 'stage').toUpperCase();
+            const status = job.status || 'unknown';
+            const progress = typeof job.progress === 'number' ? ` ${Math.round(job.progress)}%` : '';
+            const error = job.error ? ` · ${job.error}` : '';
+            return `${stage} ${status}${progress}${error}`;
+          }),
+          workflow.error ? `error=${workflow.error}` : 'error=none',
+        ];
+        setLifecycleQuery({ key, loading: false, lines });
+        return;
+      }
+
+      if (dispatchMode === 'live' && dispatchJob && dispatchJob !== 'job-tg01-ready') {
+        const response = await fetch(`/api/tg/result/${encodeURIComponent(dispatchJob)}`, { cache: 'no-store' });
+        const payload = await response.json() as { ok?: boolean; error?: string; job?: JobPayload };
+        if (!response.ok || !payload.ok || !payload.job) {
+          throw new Error(payload.error || `HTTP ${response.status}`);
+        }
+        const job = payload.job;
+        setLifecycleQuery({
+          key,
+          loading: false,
+          lines: [
+            'scope=job',
+            `job=${dispatchJob}`,
+            `status=${job.status || 'unknown'}`,
+            `started_at=${job.started_at || 'unknown'}`,
+            job.error ? `error=${job.error}` : 'error=none',
+            job.report?.summary ? `summary=${job.report.summary}` : 'summary=not_available',
+          ],
+        });
+        return;
+      }
+
+      setLifecycleQuery({
+        key,
+        loading: false,
+        lines: dispatchMode === 'test'
+          ? [`mode=test`, `local_status=${dispatchState}`, 'test queue 沒有 Bridge log；切換實際派送後即可查詢。']
+          : ['尚未建立可查詢的 job。', '請先派送一個實際任務。'],
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '無法讀取 log';
+      setLifecycleQuery({ key, loading: false, error: true, lines: [`log query failed: ${message}`] });
+    }
   };
 
   return (
@@ -616,10 +696,14 @@ export default function Home() {
               <div className="card-signal" aria-hidden="true"><span /><span /><span /><span /><span /></div>
               <h3>{item.title}</h3>
               <p>{item.detail}</p>
-              <div className="card-foot"><code>job.{item.key}</code><span>↗</span></div>
+              <div className="card-foot"><code>job.{item.key}</code><button className="lifecycle-query-button" onClick={() => void queryLifecycle(item.key)} type="button">查詢 LOG <span>↗</span></button></div>
             </article>
           ))}
         </div>
+        {lifecycleQuery && <div className={`lifecycle-log-panel ${lifecycleQuery.error ? 'error' : ''}`} role="status" aria-live="polite">
+          <div className="lifecycle-log-head"><div><p className="section-kicker">LOG QUERY / {lifecycleQuery.key.toUpperCase()}</p><strong>{lifecycleQuery.loading ? '正在讀取 Bridge log snapshot…' : '查詢結果'}</strong></div><button className="lifecycle-log-close" onClick={() => setLifecycleQuery(null)} type="button">關閉 ×</button></div>
+          <div className="lifecycle-log-lines">{lifecycleQuery.lines.map((line, index) => <code key={`${line}-${index}`}>{line}</code>)}</div>
+        </div>}
       </section>
 
       <section className="commands-safety section-wrap" id="commands">
