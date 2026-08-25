@@ -4,9 +4,9 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 
 const command = '/run 修正 Telegram worker 的 timeout lock cleanup，完成後執行 pytest，不要 push。';
 
-type LifecycleKey = 'queued' | 'running' | 'succeeded' | 'failed';
+type LifecycleKey = 'queued' | 'running' | 'succeeded' | 'failed' | 'agy' | 'claude';
 
-const lifecycle: Array<{ key: LifecycleKey; number: string; label: string; title: string; detail: string; color: string }> = [
+const lifecycle: Array<{ key: LifecycleKey; number: string; label: string; title: string; detail: string; color: string; stage: string }> = [
   {
     key: 'queued',
     number: '01',
@@ -14,6 +14,7 @@ const lifecycle: Array<{ key: LifecycleKey; number: string; label: string; title
     title: '任務進入佇列',
     detail: 'Controller 建立 job_id，檢查 workspace 與 provider，回傳可追蹤的任務卡。',
     color: 'violet',
+    stage: 'controller',
   },
   {
     key: 'running',
@@ -22,6 +23,7 @@ const lifecycle: Array<{ key: LifecycleKey; number: string; label: string; title
     title: 'Codex 開始工作',
     detail: 'Dispatcher 將任務送往 Codex，在隔離環境裡讀 repo、改程式並執行測試。',
     color: 'blue',
+    stage: 'codex',
   },
   {
     key: 'succeeded',
@@ -30,6 +32,7 @@ const lifecycle: Array<{ key: LifecycleKey; number: string; label: string; title
     title: '結果回到 Telegram',
     detail: 'Result Collector 整理摘要、changed files 與測試結果，讓你在手機上 review。',
     color: 'green',
+    stage: 'workflow',
   },
   {
     key: 'failed',
@@ -38,6 +41,25 @@ const lifecycle: Array<{ key: LifecycleKey; number: string; label: string; title
     title: '失敗也要可追蹤',
     detail: '保留錯誤、log 與 job 狀態；下一步可以 cancel、重試或人工介入。',
     color: 'red',
+    stage: 'workflow',
+  },
+  {
+    key: 'agy',
+    number: '05',
+    label: 'AGY',
+    title: 'AGY review stage',
+    detail: '檢查 Codex 產物、測試輸出與修正項目，所有 review 事件寫入同一條 workflow log。',
+    color: 'yellow',
+    stage: 'agy',
+  },
+  {
+    key: 'claude',
+    number: '06',
+    label: 'CLAUDE',
+    title: 'Claude final stage',
+    detail: '完成最後整理與回報，保留 stage、來源、狀態與可展開的詳細資訊。',
+    color: 'pink',
+    stage: 'claude',
   },
 ];
 
@@ -94,8 +116,23 @@ type WorkflowPayload = {
 type LifecycleQuery = {
   key: LifecycleKey;
   loading: boolean;
-  lines: string[];
+  logs: ExecutionLogRecord[];
+  message?: string;
+  scope?: 'workflow' | 'job';
   error?: boolean;
+};
+
+type ExecutionLogRecord = {
+  id: number;
+  job_id: string | null;
+  workflow_id: string | null;
+  stage: string;
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'blocked';
+  level: 'info' | 'warn' | 'error';
+  source: string;
+  message: string;
+  detail: string | null;
+  created_at: string;
 };
 
 type WorkflowLightState = 'green' | 'progress' | 'red' | 'off';
@@ -180,6 +217,19 @@ function getWorkflowProgress(workflow: WorkflowPayload | null, stage: WorkflowSt
   return 0;
 }
 
+function clientSafeErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error || '未知錯誤');
+  return message
+    .replace(/Bearer\s+[^\s]+/gi, 'Bearer [REDACTED]')
+    .replace(/Authorization\s*:\s*[^\r\n]+/gi, 'Authorization: [REDACTED]')
+    .slice(0, 500);
+}
+
+function formatLogTime(value: string): string {
+  const timestamp = new Date(value);
+  return Number.isNaN(timestamp.getTime()) ? value : timestamp.toLocaleString('zh-TW', { hour12: false });
+}
+
 export default function Home() {
   const [copied, setCopied] = useState(false);
   const [errorCopied, setErrorCopied] = useState(false);
@@ -194,6 +244,7 @@ export default function Home() {
   const [dispatchProgress, setDispatchProgress] = useState<DispatchPhase[]>([]);
   const [dispatchSummary, setDispatchSummary] = useState('');
   const [lifecycleQuery, setLifecycleQuery] = useState<LifecycleQuery | null>(null);
+  const [expandedLogId, setExpandedLogId] = useState<number | null>(null);
   const [bridgeHealth, setBridgeHealth] = useState<BridgeHealthState>('checking');
   const [websiteView, setWebsiteView] = useState<WebsiteView>('frontend');
   const pollingToken = useRef(0);
@@ -205,6 +256,28 @@ export default function Home() {
       : bridgeHealth === 'offline'
         ? '不可達'
         : '待連線';
+
+  const recordClientLog = (input: {
+    job_id?: string;
+    workflow_id?: string;
+    stage: string;
+    status: 'queued' | 'running' | 'succeeded' | 'failed' | 'blocked';
+    level: 'info' | 'warn' | 'error';
+    source: 'control-plane';
+    message: string;
+    detail?: string;
+  }) => {
+    void fetch('/control-api/logs', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        ...input,
+        message: clientSafeErrorMessage(input.message),
+        detail: input.detail ? clientSafeErrorMessage(input.detail) : undefined,
+      }),
+      keepalive: true,
+    }).catch(() => undefined);
+  };
 
   const refreshBridgeHealth = async () => {
     try {
@@ -218,8 +291,16 @@ export default function Home() {
         setBridgeHealth('offline');
       }
       return payload;
-    } catch {
+    } catch (error) {
       setBridgeHealth('offline');
+      recordClientLog({
+        stage: 'telegram',
+        status: 'failed',
+        level: 'error',
+        source: 'control-plane',
+        message: '無法讀取 health API',
+        detail: clientSafeErrorMessage(error),
+      });
       return { ok: false, bridgeConfigured: false, bridgeConnected: false };
     }
   };
@@ -238,8 +319,16 @@ export default function Home() {
           setBridgeHealth('offline');
         }
       })
-      .catch(() => {
+      .catch((error) => {
         if (active) setBridgeHealth('offline');
+        recordClientLog({
+          stage: 'telegram',
+          status: 'failed',
+          level: 'error',
+          source: 'control-plane',
+          message: '無法讀取 health API',
+          detail: clientSafeErrorMessage(error),
+        });
       });
     return () => {
       active = false;
@@ -305,11 +394,20 @@ export default function Home() {
           setDispatchSummary(payload.job.report?.summary || payload.job.error || 'Codex job failed。');
           return;
         }
-      } catch {
+      } catch (error) {
         if (pollingToken.current !== token) return;
         setDispatchState('failed');
         setDispatchProgress(['queued', 'failed']);
         setDispatchSummary('無法讀取 job 結果，請稍後使用 /result 查詢。');
+        recordClientLog({
+          job_id: jobId,
+          stage: 'codex',
+          status: 'failed',
+          level: 'error',
+          source: 'control-plane',
+          message: '無法讀取 job 結果',
+          detail: clientSafeErrorMessage(error),
+        });
         return;
       }
     }
@@ -357,8 +455,17 @@ export default function Home() {
         if (pollingToken.current !== token) return;
         setDispatchState('failed');
         setDispatchProgress(['queued', 'failed']);
-        const detail = error instanceof Error ? error.message : '未知錯誤';
-        const failureMessage = `無法讀取 workflow 結果：${detail}。請使用 /workflow ${flowId} 查詢。`;
+        const detail = clientSafeErrorMessage(error);
+        const failureMessage = `無法讀取 workflow 結果：${detail}`;
+        recordClientLog({
+          workflow_id: flowId,
+          stage: 'workflow',
+          status: 'failed',
+          level: 'error',
+          source: 'control-plane',
+          message: failureMessage,
+          detail: `flow_id=${flowId}; query=/workflow ${flowId}`,
+        });
         setWorkflowState((current) => {
           const stage = workflowStages.some((item) => item.key === current?.current_stage?.toLowerCase())
             ? current?.current_stage?.toLowerCase() as WorkflowStage
@@ -368,7 +475,7 @@ export default function Home() {
             : job) ?? [{ workflow_stage: stage, status: 'failed' }];
           return { ...current, status: 'failed', current_stage: stage, error: failureMessage, jobs };
         });
-        setDispatchSummary(failureMessage);
+        setDispatchSummary(`${failureMessage}。請使用 /workflow ${flowId} 查詢。`);
         return;
       }
     }
@@ -377,6 +484,15 @@ export default function Home() {
       setDispatchState('failed');
       setDispatchProgress(['queued', 'failed']);
       const failureMessage = `等待 workflow 結果逾時，請使用 /workflow ${flowId} 查詢。`;
+      recordClientLog({
+        workflow_id: flowId,
+        stage: 'workflow',
+        status: 'failed',
+        level: 'error',
+        source: 'control-plane',
+        message: '等待 workflow 結果逾時',
+        detail: `flow_id=${flowId}; query=/workflow ${flowId}`,
+      });
       setWorkflowState((current) => {
         const stage = workflowStages.some((item) => item.key === current?.current_stage?.toLowerCase())
           ? current?.current_stage?.toLowerCase() as WorkflowStage
@@ -458,8 +574,16 @@ export default function Home() {
           setDispatchSummary('任務已進入 queue，等待 Codex worker 接手。');
           void pollJob(payload.job.id, token);
         }
-      } catch {
+      } catch (error) {
         setDispatchState('blocked');
+        recordClientLog({
+          stage: dispatchFlow === 'loop' ? 'workflow' : 'codex',
+          status: 'failed',
+          level: 'error',
+          source: 'control-plane',
+          message: 'Live dispatch request failed',
+          detail: clientSafeErrorMessage(error),
+        });
       }
       return;
     }
@@ -473,66 +597,48 @@ export default function Home() {
   };
 
   const queryLifecycle = async (key: LifecycleKey) => {
-    setLifecycleQuery({ key, loading: true, lines: ['正在查詢 Bridge log snapshot…'] });
+    const card = lifecycle.find((item) => item.key === key);
+    setExpandedLogId(null);
+    setLifecycleQuery({ key, loading: true, logs: [], message: '正在讀取 SQLite execution log…' });
     try {
-      if (workflowId) {
-        const response = await fetch(`/api/tg/workflow/${encodeURIComponent(workflowId)}`, { cache: 'no-store' });
-        const payload = await response.json() as { ok?: boolean; error?: string; workflow?: WorkflowPayload };
-        if (!response.ok || !payload.ok || !payload.workflow) {
-          throw new Error(payload.error || `HTTP ${response.status}`);
-        }
-        const workflow = payload.workflow;
-        setWorkflowState(workflow);
-        const lines = [
-          `scope=workflow`,
-          `workflow=${workflowId}`,
-          `status=${workflow.status || 'unknown'}`,
-          `current_stage=${workflow.current_stage || 'unknown'}`,
-          ...(workflow.jobs || []).map((job) => {
-            const stage = (job.workflow_stage || 'stage').toUpperCase();
-            const status = job.status || 'unknown';
-            const progress = typeof job.progress === 'number' ? ` ${Math.round(job.progress)}%` : '';
-            const error = job.error ? ` · ${job.error}` : '';
-            return `${stage} ${status}${progress}${error}`;
-          }),
-          workflow.error ? `error=${workflow.error}` : 'error=none',
-        ];
-        setLifecycleQuery({ key, loading: false, lines });
-        return;
-      }
-
-      if (dispatchMode === 'live' && dispatchJob && dispatchJob !== 'job-tg01-ready') {
-        const response = await fetch(`/api/tg/result/${encodeURIComponent(dispatchJob)}`, { cache: 'no-store' });
-        const payload = await response.json() as { ok?: boolean; error?: string; job?: JobPayload };
-        if (!response.ok || !payload.ok || !payload.job) {
-          throw new Error(payload.error || `HTTP ${response.status}`);
-        }
-        const job = payload.job;
+      const scope = workflowId ? 'workflow' : (dispatchMode === 'live' && dispatchJob && dispatchJob !== 'job-tg01-ready' ? 'job' : null);
+      const id = workflowId || (scope === 'job' ? dispatchJob : '');
+      if (!scope || !id) {
         setLifecycleQuery({
           key,
           loading: false,
-          lines: [
-            'scope=job',
-            `job=${dispatchJob}`,
-            `status=${job.status || 'unknown'}`,
-            `started_at=${job.started_at || 'unknown'}`,
-            job.error ? `error=${job.error}` : 'error=none',
-            job.report?.summary ? `summary=${job.report.summary}` : 'summary=not_available',
-          ],
+          logs: [],
+          message: dispatchMode === 'test'
+            ? `測試模式沒有 SQLite execution log；請切換實際派送後查詢 ${card?.label || key}。`
+            : '尚未建立可查詢的 job_id 或 workflow_id。',
         });
         return;
       }
-
+      const response = await fetch(`/control-api/logs?${scope === 'workflow' ? 'workflow_id' : 'job_id'}=${encodeURIComponent(id)}&limit=100`, { cache: 'no-store' });
+      const payload = await response.json() as { ok?: boolean; error?: string; logs?: ExecutionLogRecord[]; scope?: 'workflow' | 'job' };
+      if (!response.ok || !payload.ok || !Array.isArray(payload.logs)) {
+        throw new Error(payload.error || `HTTP ${response.status}`);
+      }
       setLifecycleQuery({
         key,
         loading: false,
-        lines: dispatchMode === 'test'
-          ? [`mode=test`, `local_status=${dispatchState}`, 'test queue 沒有 Bridge log；切換實際派送後即可查詢。']
-          : ['尚未建立可查詢的 job。', '請先派送一個實際任務。'],
+        logs: payload.logs,
+        scope: payload.scope,
+        message: payload.logs.length ? undefined : `目前沒有 ${card?.label || key} 的紀錄。`,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : '無法讀取 log';
-      setLifecycleQuery({ key, loading: false, error: true, lines: [`log query failed: ${message}`] });
+      const message = clientSafeErrorMessage(error);
+      recordClientLog({
+        job_id: workflowId ? undefined : (dispatchJob !== 'job-tg01-ready' ? dispatchJob : undefined),
+        workflow_id: workflowId || undefined,
+        stage: card?.stage || 'control-plane',
+        status: 'failed',
+        level: 'error',
+        source: 'control-plane',
+        message: `無法讀取 ${card?.label || key} LOG：${message}`,
+        detail: workflowId ? `workflow_id=${workflowId}` : `job_id=${dispatchJob}`,
+      });
+      setLifecycleQuery({ key, loading: false, logs: [], error: true, message: `LOG query failed: ${message}` });
     }
   };
 
@@ -720,13 +826,13 @@ export default function Home() {
           <div><p className="section-kicker">01 / SYSTEM MAP</p><h2>一條清楚的主線，<br />把複雜度留在幕後。</h2></div>
           <p>loop 會依序通過 GPT → AGY → Claude，最後回報完成度與 GitHub 報告；每個階段都能看見目前進度。</p>
         </div>
-        <div className="pipeline" role="img" aria-label="Telegram、Controller、GPT、AGY、Claude 到回報完成度的任務流程">
-          <div className={`pipeline-node telegram ${getPipelineNodeState(workflowState, 'telegram')}`}><span className="node-index">01</span><span className="node-icon">TG</span><strong>Telegram</strong><small>你的入口</small></div><Arrow />
-          <div className={`pipeline-node controller ${getPipelineNodeState(workflowState, 'controller')}`}><span className="node-index">02</span><span className="node-icon">◈</span><strong>Controller</strong><small>權限 · queue · job_id</small></div><Arrow />
-          <div className={`pipeline-node codex ${getPipelineNodeState(workflowState, 'gpt')}`}><span className="node-index">03</span><span className="node-icon">CX</span><strong>GPT / Codex</strong><small>repo · code · tests</small></div><Arrow />
-          <div className={`pipeline-node agy ${getPipelineNodeState(workflowState, 'agy')}`}><span className="node-index">04</span><span className="node-icon">AG</span><strong>AGY</strong><small>review · verify</small></div><Arrow />
-          <div className={`pipeline-node claude ${getPipelineNodeState(workflowState, 'claude')}`}><span className="node-index">05</span><span className="node-icon">CL</span><strong>Claude</strong><small>final · refine</small></div><Arrow />
-          <div className={`pipeline-node report ${getPipelineNodeState(workflowState, 'report')}`}><span className="node-index">06</span><span className="node-icon">↺</span><strong>回報完成度</strong><small>{workflowId ? `${getWorkflowCompletion(workflowState)}% · summary · GitHub` : 'summary · diff · status'}</small></div>
+        <div className="pipeline" aria-label="Telegram、Controller、GPT、AGY、Claude 到回報完成度的任務流程">
+          <div className={`pipeline-node telegram ${getPipelineNodeState(workflowState, 'telegram')}`}><span className="node-index">01</span><span className="node-icon">TG</span><strong>Telegram</strong><small>你的入口</small><button className="pipeline-log-query" onClick={() => void queryLifecycle('queued')} type="button">查詢 LOG</button></div><Arrow />
+          <div className={`pipeline-node controller ${getPipelineNodeState(workflowState, 'controller')}`}><span className="node-index">02</span><span className="node-icon">◈</span><strong>Controller</strong><small>權限 · queue · job_id</small><button className="pipeline-log-query" onClick={() => void queryLifecycle('queued')} type="button">查詢 LOG</button></div><Arrow />
+          <div className={`pipeline-node codex ${getPipelineNodeState(workflowState, 'gpt')}`}><span className="node-index">03</span><span className="node-icon">CX</span><strong>GPT / Codex</strong><small>repo · code · tests</small><button className="pipeline-log-query" onClick={() => void queryLifecycle('running')} type="button">查詢 LOG</button></div><Arrow />
+          <div className={`pipeline-node agy ${getPipelineNodeState(workflowState, 'agy')}`}><span className="node-index">04</span><span className="node-icon">AG</span><strong>AGY</strong><small>review · verify</small><button className="pipeline-log-query" onClick={() => void queryLifecycle('agy')} type="button">查詢 LOG</button></div><Arrow />
+          <div className={`pipeline-node claude ${getPipelineNodeState(workflowState, 'claude')}`}><span className="node-index">05</span><span className="node-icon">CL</span><strong>Claude</strong><small>final · refine</small><button className="pipeline-log-query" onClick={() => void queryLifecycle('claude')} type="button">查詢 LOG</button></div><Arrow />
+          <div className={`pipeline-node report ${getPipelineNodeState(workflowState, 'report')}`}><span className="node-index">06</span><span className="node-icon">↺</span><strong>回報完成度</strong><small>{workflowId ? `${getWorkflowCompletion(workflowState)}% · summary · GitHub` : 'summary · diff · status'}</small><button className="pipeline-log-query" onClick={() => void queryLifecycle('succeeded')} type="button">查詢 LOG</button></div>
         </div>
         <div className="architecture-caption"><span className="caption-line" /><span>One source of truth</span><span className="caption-line caption-line-short" /><span className="muted-caption">所有狀態都能被查詢、取消、回看</span></div>
       </section>
@@ -743,13 +849,32 @@ export default function Home() {
               <div className="card-signal" aria-hidden="true"><span /><span /><span /><span /><span /></div>
               <h3>{item.title}</h3>
               <p>{item.detail}</p>
-              <div className="card-foot"><code>job.{item.key}</code><button className="lifecycle-query-button" onClick={() => void queryLifecycle(item.key)} type="button">查詢 LOG <span>↗</span></button></div>
+              <div className="card-foot"><code>{item.stage}.log</code><button className="lifecycle-query-button" onClick={() => void queryLifecycle(item.key)} type="button">查詢 LOG <span>↗</span></button></div>
             </article>
           ))}
         </div>
         {lifecycleQuery && <div className={`lifecycle-log-panel ${lifecycleQuery.error ? 'error' : ''}`} role="status" aria-live="polite">
-          <div className="lifecycle-log-head"><div><p className="section-kicker">LOG QUERY / {lifecycleQuery.key.toUpperCase()}</p><strong>{lifecycleQuery.loading ? '正在讀取 Bridge log snapshot…' : '查詢結果'}</strong></div><button className="lifecycle-log-close" onClick={() => setLifecycleQuery(null)} type="button">關閉 ×</button></div>
-          <div className="lifecycle-log-lines">{lifecycleQuery.lines.map((line, index) => <code key={`${line}-${index}`}>{line}</code>)}</div>
+          <div className="lifecycle-log-head"><div><p className="section-kicker">SQLITE LOG / {lifecycleQuery.key.toUpperCase()}</p><strong>{lifecycleQuery.loading ? '正在讀取 SQLite execution log…' : `查詢結果 · ${lifecycleQuery.scope || '未建立 scope'}`}</strong></div><button className="lifecycle-log-close" onClick={() => setLifecycleQuery(null)} type="button">關閉 ×</button></div>
+          {lifecycleQuery.message && <div className="lifecycle-log-message">{lifecycleQuery.message}</div>}
+          <div className="execution-log-list">
+            {lifecycleQuery.logs.map((log) => <article className={`execution-log-entry status-${log.status}`} key={log.id}>
+              <button className="execution-log-summary" onClick={() => setExpandedLogId((current) => current === log.id ? null : log.id)} type="button" aria-expanded={expandedLogId === log.id}>
+                <span className="execution-log-status" data-level={log.level}>{log.status}</span>
+                <span className="execution-log-time">{formatLogTime(log.created_at)}</span>
+                <span className="execution-log-stage">{log.stage}</span>
+                <span className="execution-log-source">{log.source}</span>
+                <span className="execution-log-message">{log.message}</span>
+                <span className="execution-log-toggle" aria-hidden="true">{expandedLogId === log.id ? '−' : '+'}</span>
+              </button>
+              {expandedLogId === log.id && <div className="execution-log-detail">
+                <code>time={log.created_at}</code>
+                <code>stage={log.stage} status={log.status} level={log.level} source={log.source}</code>
+                <code>job_id={log.job_id || 'null'} workflow_id={log.workflow_id || 'null'}</code>
+                <p>{log.message}</p>
+                {log.detail && <pre>{log.detail}</pre>}
+              </div>}
+            </article>)}
+          </div>
         </div>}
       </section>
 

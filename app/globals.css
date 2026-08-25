@@ -127,6 +127,8 @@ button { font: inherit; }
 .pipeline { grid-template-columns: repeat(5, minmax(0, 1fr) auto) minmax(0, 1fr); gap: 13px; }
 .pipeline-node { min-width: 0; }
 .pipeline-node small { white-space: normal; }
+.pipeline-log-query { align-self: flex-start; margin-top: auto; padding: 5px 0 0; border: 0; border-top: 1px solid rgba(255,255,255,.13); background: transparent; color: var(--node-color); cursor: pointer; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .06em; }
+.pipeline-log-query:hover { color: var(--ink); }
 .pipeline-node.agy { --node-color: #f1c66b; }
 .pipeline-node.claude { --node-color: #e5a8ff; }
 .pipeline-node.report { --node-color: var(--green); }
@@ -175,7 +177,43 @@ button { font: inherit; }
 .lifecycle-log-lines code { color: #a7b7b2; font: 10px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
 .lifecycle-log-panel.error .lifecycle-log-lines code { color: #f0aaa0; }
 
+.lifecycle-card.yellow { --card-color: #f1c66b; }
+.lifecycle-card.pink { --card-color: #e5a8ff; }
+.lifecycle-log-message { margin-top: 15px; padding: 11px 12px; border: 1px solid var(--line); color: #9aa9a7; font: 10px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+.lifecycle-log-panel.error .lifecycle-log-message { border-color: rgba(255,136,122,.35); color: #f0aaa0; }
+.execution-log-list { display: grid; gap: 8px; margin-top: 16px; }
+.execution-log-entry { border: 1px solid var(--line); border-left: 3px solid #718086; background: rgba(255,255,255,.018); }
+.execution-log-entry.status-queued { border-left-color: var(--violet); }
+.execution-log-entry.status-running { border-left-color: var(--blue); }
+.execution-log-entry.status-succeeded { border-left-color: var(--green); }
+.execution-log-entry.status-failed { border-left-color: var(--red); }
+.execution-log-entry.status-blocked { border-left-color: #f1c66b; }
+.execution-log-summary { display: grid; grid-template-columns: 78px minmax(132px, auto) 75px 86px minmax(0, 1fr) 20px; align-items: center; gap: 9px; width: 100%; padding: 11px 12px; border: 0; background: transparent; color: #d6e2dc; cursor: pointer; text-align: left; }
+.execution-log-summary:hover { background: rgba(255,255,255,.035); }
+.execution-log-status { color: #b9c8c2; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; text-transform: uppercase; }
+.status-queued .execution-log-status { color: var(--violet); }
+.status-running .execution-log-status { color: var(--blue); }
+.status-succeeded .execution-log-status { color: var(--green); }
+.status-failed .execution-log-status { color: var(--red); }
+.status-blocked .execution-log-status { color: #f1c66b; }
+.execution-log-status::before { content: '● '; font-size: 8px; }
+.execution-log-status[data-level="error"]::after { content: ' · error'; color: var(--red); }
+.execution-log-status[data-level="warn"]::after { content: ' · warn'; color: #f1c66b; }
+.execution-log-time, .execution-log-stage, .execution-log-source, .execution-log-message, .execution-log-detail code, .execution-log-detail pre { font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.execution-log-time, .execution-log-stage, .execution-log-source { color: #849398; }
+.execution-log-message { min-width: 0; overflow: hidden; color: #c9d7d0; text-overflow: ellipsis; white-space: nowrap; }
+.execution-log-toggle { color: var(--green); font: 16px ui-monospace, SFMono-Regular, Menlo, monospace; text-align: center; }
+.execution-log-detail { display: grid; gap: 6px; padding: 12px; border-top: 1px solid var(--line); background: rgba(0,0,0,.13); }
+.execution-log-detail code { color: #8fa09b; white-space: pre-wrap; word-break: break-word; }
+.execution-log-detail p { margin: 2px 0 0; color: #d3e0d9; font-size: 11px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+.execution-log-detail pre { margin: 0; padding: 8px; border: 1px solid rgba(255,255,255,.08); color: #b1c0b9; white-space: pre-wrap; word-break: break-word; }
+
 @media (max-width: 620px) {
   .lifecycle-log-head { align-items: flex-start; flex-direction: column; }
   .lifecycle-log-close { align-self: flex-end; margin-top: -35px; }
+  .execution-log-summary { grid-template-columns: 1fr auto; gap: 4px 8px; }
+  .execution-log-status { grid-column: 1; }
+  .execution-log-toggle { grid-column: 2; grid-row: 1 / span 2; }
+  .execution-log-time, .execution-log-stage, .execution-log-source { grid-column: 1; }
+  .execution-log-message { grid-column: 1 / span 2; white-space: normal; }
 }

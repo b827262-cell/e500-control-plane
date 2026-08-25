@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server';
+import { coerceLogStatus, writeExecutionLogBestEffort } from '@/app/lib/execution-logs';
 
 type BridgeJobResponse = {
   ok?: boolean;
-  job?: { id?: string; status?: string };
+  job?: { id?: string; workflow_id?: string | null; status?: string; error?: string | null; report?: { summary?: string } | null };
   code?: string;
   message?: string;
 };
@@ -16,6 +17,14 @@ export async function POST(request: Request) {
     .find(Boolean) ?? process.env.TELEGRAM_ALLOWED_CHAT_ID;
 
   if (!bridgeUrl || !bridgeToken || !allowedUserId) {
+    await writeExecutionLogBestEffort({
+      stage: 'codex',
+      status: 'blocked',
+      level: 'warn',
+      source: 'controller',
+      message: 'Codex job dispatch blocked: Bridge configuration required',
+      detail: 'runtime configuration is incomplete',
+    });
     return NextResponse.json(
       { ok: false, code: 'BRIDGE_REQUIRED' },
       { status: 503 },
@@ -26,6 +35,13 @@ export async function POST(request: Request) {
     const body = await request.json() as { task?: unknown; mode?: unknown; provider?: unknown };
     const task = typeof body.task === 'string' ? body.task.trim() : '';
     if (!task || task.length > 12000) {
+      await writeExecutionLogBestEffort({
+        stage: 'codex',
+        status: 'failed',
+        level: 'error',
+        source: 'controller',
+        message: 'Codex job rejected: task is invalid',
+      });
       return NextResponse.json(
         { ok: false, code: 'TASK_INVALID' },
         { status: 400 },
@@ -48,8 +64,25 @@ export async function POST(request: Request) {
       cache: 'no-store',
     });
     const payload = await response.json() as BridgeJobResponse;
+    await writeExecutionLogBestEffort({
+      job_id: payload.job?.id,
+      workflow_id: payload.job?.workflow_id,
+      stage: 'codex',
+      status: response.ok && payload.ok !== false ? coerceLogStatus(payload.job?.status, 'queued') : (payload.code === 'CODEX_EXEC_RUNNING' ? 'blocked' : 'failed'),
+      level: response.ok && payload.ok !== false ? 'info' : (payload.code === 'CODEX_EXEC_RUNNING' ? 'warn' : 'error'),
+      source: 'controller',
+      message: response.ok && payload.ok !== false ? 'Codex job queued' : (payload.message || payload.code || 'Codex job dispatch failed'),
+      detail: payload.job?.error || payload.job?.report?.summary || null,
+    });
     return NextResponse.json(payload, { status: response.status });
-  } catch {
+  } catch (error) {
+    await writeExecutionLogBestEffort({
+      stage: 'codex',
+      status: 'failed',
+      level: 'error',
+      source: 'control-plane',
+      message: error instanceof Error ? error.message : 'Codex Bridge request failed',
+    });
     return NextResponse.json(
       { ok: false, code: 'BRIDGE_UNREACHABLE' },
       { status: 502 },

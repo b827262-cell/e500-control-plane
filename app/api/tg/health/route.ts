@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { writeExecutionLogBestEffort } from '@/app/lib/execution-logs';
 
 type TelegramResponse = {
   ok?: boolean;
@@ -32,6 +33,13 @@ export async function GET() {
     .filter(Boolean);
 
   if (!token) {
+    await writeExecutionLogBestEffort({
+      stage: 'telegram',
+      status: 'blocked',
+      level: 'warn',
+      source: 'telegram',
+      message: 'Telegram health check blocked: bot configuration required',
+    });
     return NextResponse.json(
       { ok: false, code: 'TG_CONFIG_REQUIRED', bridgeConfigured: false },
       { status: 503 },
@@ -45,6 +53,14 @@ export async function GET() {
     const payload = (await response.json()) as TelegramResponse;
 
     if (!response.ok || !payload.ok || !payload.result?.is_bot) {
+      await writeExecutionLogBestEffort({
+        stage: 'telegram',
+        status: 'failed',
+        level: 'error',
+        source: 'telegram',
+        message: 'Telegram bot health check failed',
+        detail: 'Telegram getMe rejected the configured bot credential',
+      });
       return NextResponse.json(
         { ok: false, code: 'TG_TOKEN_INVALID', bridgeConfigured: false },
         { status: 502 },
@@ -71,6 +87,15 @@ export async function GET() {
       bridgeCode = 'BRIDGE_AUTH_REQUIRED';
     }
 
+    await writeExecutionLogBestEffort({
+      stage: 'telegram',
+      status: bridgeConnected ? 'succeeded' : (bridge.url ? 'failed' : 'blocked'),
+      level: bridgeConnected ? 'info' : (bridge.url ? 'error' : 'warn'),
+      source: 'telegram',
+      message: bridgeConnected ? 'Telegram and Codex Bridge health checks passed' : `Telegram health check: ${bridgeCode}`,
+      detail: bridge.url ? bridgeCode : 'Bridge URL is not configured',
+    });
+
     return NextResponse.json({
       ok: true,
       bot: {
@@ -84,7 +109,14 @@ export async function GET() {
       bridgeCode,
       bridge: bridgeHealth ? { service: bridgeHealth.service, api: bridgeHealth.api, queue: bridgeHealth.queue } : null,
     });
-  } catch {
+  } catch (error) {
+    await writeExecutionLogBestEffort({
+      stage: 'telegram',
+      status: 'failed',
+      level: 'error',
+      source: 'telegram',
+      message: error instanceof Error ? error.message : 'Telegram API health check failed',
+    });
     return NextResponse.json(
       { ok: false, code: 'TG_API_UNREACHABLE', bridgeConfigured: false },
       { status: 502 },
