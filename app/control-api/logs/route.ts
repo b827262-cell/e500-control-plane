@@ -3,6 +3,7 @@ import {
   LogDatabaseUnavailableError,
   LogInputError,
   normalizeLogId,
+  normalizeLogStage,
   queryExecutionLogs,
   writeExecutionLog,
 } from '@/app/lib/execution-logs';
@@ -34,11 +35,12 @@ export async function GET(request: Request) {
     const url = new URL(request.url);
     const workflowId = normalizeLogId(url.searchParams.get('workflow_id'), 'workflow_id');
     const jobId = normalizeLogId(url.searchParams.get('job_id'), 'job_id');
+    const stage = url.searchParams.get('stage') ? normalizeLogStage(url.searchParams.get('stage')) : null;
     if ((workflowId && jobId) || (!workflowId && !jobId)) {
       throw new LogInputError('workflow_id 或 job_id 必須提供且只能提供一個');
     }
-    const logs = await queryExecutionLogs({ workflowId, jobId, limit: parseLimit(url.searchParams.get('limit')) });
-    return NextResponse.json({ ok: true, logs, count: logs.length, scope: workflowId ? 'workflow' : 'job' });
+    const logs = await queryExecutionLogs({ workflowId, jobId, stage, limit: parseLimit(url.searchParams.get('limit')) });
+    return NextResponse.json({ ok: true, logs, count: logs.length, scope: workflowId ? 'workflow' : 'job', stage });
   } catch (error) {
     return errorResponse(error);
   }

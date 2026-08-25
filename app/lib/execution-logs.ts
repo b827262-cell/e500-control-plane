@@ -2,6 +2,7 @@ import { env } from 'cloudflare:workers';
 import type { D1Database } from '@cloudflare/workers-types';
 import {
   executionLogsJobIndexSql,
+  executionLogsCurrentFailureSeedSql,
   executionLogsSeedSql,
   executionLogsTableSql,
   executionLogsWorkflowIndexSql,
@@ -131,6 +132,7 @@ async function ensureExecutionLogSchema(db: D1Database): Promise<void> {
     db.prepare(executionLogsWorkflowIndexSql),
     db.prepare(executionLogsJobIndexSql),
     db.prepare(executionLogsSeedSql),
+    db.prepare(executionLogsCurrentFailureSeedSql),
     db.prepare('PRAGMA optimize'),
   ]).then(() => undefined).catch((error) => {
     databasePromises.delete(db);
@@ -184,27 +186,35 @@ export async function writeExecutionLogBestEffort(input: ExecutionLogInput): Pro
   }
 }
 
-export async function queryExecutionLogs(input: { workflowId?: string | null; jobId?: string | null; limit: number }): Promise<ExecutionLogRecord[]> {
+function stageFilter(stage: string | null | undefined): { sql: string; values: string[] } {
+  if (!stage) return { sql: '', values: [] };
+  if (stage === 'gpt') return { sql: ' AND stage IN (?, ?)', values: ['gpt', 'codex'] };
+  if (stage === 'report') return { sql: ' AND stage IN (?, ?)', values: ['report', 'workflow'] };
+  return { sql: ' AND stage = ?', values: [stage] };
+}
+
+export async function queryExecutionLogs(input: { workflowId?: string | null; jobId?: string | null; stage?: string | null; limit: number }): Promise<ExecutionLogRecord[]> {
   const db = database();
   await ensureExecutionLogSchema(db);
+  const filter = stageFilter(input.stage);
   if (input.workflowId) {
     const result = await db.prepare(`
       SELECT id, job_id, workflow_id, stage, status, level, source, message, detail, created_at
       FROM execution_logs
-      WHERE workflow_id = ?
+      WHERE workflow_id = ?${filter.sql}
       ORDER BY created_at DESC, id DESC
       LIMIT ?
-    `).bind(input.workflowId, input.limit).all<ExecutionLogRecord>();
+    `).bind(input.workflowId, ...filter.values, input.limit).all<ExecutionLogRecord>();
     return result.results;
   }
   if (input.jobId) {
     const result = await db.prepare(`
       SELECT id, job_id, workflow_id, stage, status, level, source, message, detail, created_at
       FROM execution_logs
-      WHERE job_id = ?
+      WHERE job_id = ?${filter.sql}
       ORDER BY created_at DESC, id DESC
       LIMIT ?
-    `).bind(input.jobId, input.limit).all<ExecutionLogRecord>();
+    `).bind(input.jobId, ...filter.values, input.limit).all<ExecutionLogRecord>();
     return result.results;
   }
   throw new LogInputError('workflow_id 或 job_id 必須提供一個');

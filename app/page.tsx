@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 
 const command = '/run 修正 Telegram worker 的 timeout lock cleanup，完成後執行 pytest，不要 push。';
+const defaultWorkflowId = 'flow-abfbbaa69b6247dc';
 
 type LifecycleKey = 'queued' | 'running' | 'succeeded' | 'failed' | 'agy' | 'claude';
 
@@ -115,10 +116,14 @@ type WorkflowPayload = {
 
 type LifecycleQuery = {
   key: LifecycleKey;
+  stage: string;
   loading: boolean;
   logs: ExecutionLogRecord[];
   message?: string;
   scope?: 'workflow' | 'job';
+  queryCommand?: string;
+  offlineMessage?: string;
+  offline?: boolean;
   error?: boolean;
 };
 
@@ -230,6 +235,31 @@ function formatLogTime(value: string): string {
   return Number.isNaN(timestamp.getTime()) ? value : timestamp.toLocaleString('zh-TW', { hour12: false });
 }
 
+async function copyTextToClipboard(value: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch {
+    // Fall through to the compatibility path for embedded/mobile browsers.
+  }
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = value;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand('copy');
+    textarea.remove();
+    return copied;
+  } catch {
+    return false;
+  }
+}
+
 export default function Home() {
   const [copied, setCopied] = useState(false);
   const [errorCopied, setErrorCopied] = useState(false);
@@ -239,15 +269,17 @@ export default function Home() {
   const [dispatchState, setDispatchState] = useState<DispatchState>('idle');
   const [dispatchJob, setDispatchJob] = useState('job-tg01-ready');
   const [dispatchCode, setDispatchCode] = useState('');
-  const [workflowId, setWorkflowId] = useState('');
+  const [workflowId, setWorkflowId] = useState(defaultWorkflowId);
   const [workflowState, setWorkflowState] = useState<WorkflowPayload | null>(null);
   const [dispatchProgress, setDispatchProgress] = useState<DispatchPhase[]>([]);
   const [dispatchSummary, setDispatchSummary] = useState('');
   const [lifecycleQuery, setLifecycleQuery] = useState<LifecycleQuery | null>(null);
   const [expandedLogId, setExpandedLogId] = useState<number | null>(null);
+  const [copiedLogQuery, setCopiedLogQuery] = useState(false);
   const [bridgeHealth, setBridgeHealth] = useState<BridgeHealthState>('checking');
   const [websiteView, setWebsiteView] = useState<WebsiteView>('frontend');
   const pollingToken = useRef(0);
+  const logCloseButtonRef = useRef<HTMLButtonElement>(null);
 
   const bridgeLabel = bridgeHealth === 'connected'
     ? 'API linked'
@@ -335,11 +367,27 @@ export default function Home() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!lifecycleQuery) return;
+    logCloseButtonRef.current?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setLifecycleQuery(null);
+        setExpandedLogId(null);
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [lifecycleQuery]);
+
   const copyCommand = async () => {
     try {
-      await navigator.clipboard.writeText(command);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1800);
+      if (await copyTextToClipboard(command)) {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1800);
+      } else {
+        setCopied(false);
+      }
     } catch {
       setCopied(false);
     }
@@ -349,11 +397,29 @@ export default function Home() {
     const query = workflowId ? `/workflow ${workflowId}` : '/workflow <flow_id>';
     const errorText = `E500 workflow error\n${dispatchSummary}\n查詢命令：${query}`;
     try {
-      await navigator.clipboard.writeText(errorText);
-      setErrorCopied(true);
-      window.setTimeout(() => setErrorCopied(false), 1800);
+      if (await copyTextToClipboard(errorText)) {
+        setErrorCopied(true);
+        window.setTimeout(() => setErrorCopied(false), 1800);
+      } else {
+        setErrorCopied(false);
+      }
     } catch {
       setErrorCopied(false);
+    }
+  };
+
+  const copyLogQuery = async () => {
+    const query = lifecycleQuery?.queryCommand;
+    if (!query) return;
+    try {
+      if (await copyTextToClipboard(query)) {
+        setCopiedLogQuery(true);
+        window.setTimeout(() => setCopiedLogQuery(false), 1800);
+      } else {
+        setCopiedLogQuery(false);
+      }
+    } catch {
+      setCopiedLogQuery(false);
     }
   };
 
@@ -596,34 +662,42 @@ export default function Home() {
       : '測試模式只模擬 queue，不會呼叫 Codex Bridge。');
   };
 
-  const queryLifecycle = async (key: LifecycleKey) => {
+  const queryLifecycle = async (key: LifecycleKey, stageOverride?: string) => {
     const card = lifecycle.find((item) => item.key === key);
+    const stage = stageOverride || card?.stage || 'workflow';
     setExpandedLogId(null);
-    setLifecycleQuery({ key, loading: true, logs: [], message: '正在讀取 SQLite execution log…' });
+    setCopiedLogQuery(false);
+    setLifecycleQuery({ key, stage, loading: true, logs: [], message: '正在讀取 SQLite execution log…' });
     try {
       const scope = workflowId ? 'workflow' : (dispatchMode === 'live' && dispatchJob && dispatchJob !== 'job-tg01-ready' ? 'job' : null);
       const id = workflowId || (scope === 'job' ? dispatchJob : '');
+      const queryCommand = scope === 'workflow' && id ? `/workflow ${id}` : scope === 'job' && id ? `/result ${id}` : undefined;
       if (!scope || !id) {
         setLifecycleQuery({
           key,
+          stage,
           loading: false,
           logs: [],
+          queryCommand,
           message: dispatchMode === 'test'
             ? `測試模式沒有 SQLite execution log；請切換實際派送後查詢 ${card?.label || key}。`
             : '尚未建立可查詢的 job_id 或 workflow_id。',
         });
         return;
       }
-      const response = await fetch(`/control-api/logs?${scope === 'workflow' ? 'workflow_id' : 'job_id'}=${encodeURIComponent(id)}&limit=100`, { cache: 'no-store' });
+      const queryUrl = `/control-api/logs?${scope === 'workflow' ? 'workflow_id' : 'job_id'}=${encodeURIComponent(id)}&stage=${encodeURIComponent(stage)}&limit=100`;
+      const response = await fetch(queryUrl, { cache: 'no-store' });
       const payload = await response.json() as { ok?: boolean; error?: string; logs?: ExecutionLogRecord[]; scope?: 'workflow' | 'job' };
       if (!response.ok || !payload.ok || !Array.isArray(payload.logs)) {
         throw new Error(payload.error || `HTTP ${response.status}`);
       }
       setLifecycleQuery({
         key,
+        stage,
         loading: false,
         logs: payload.logs,
         scope: payload.scope,
+        queryCommand,
         message: payload.logs.length ? undefined : `目前沒有 ${card?.label || key} 的紀錄。`,
       });
     } catch (error) {
@@ -631,14 +705,32 @@ export default function Home() {
       recordClientLog({
         job_id: workflowId ? undefined : (dispatchJob !== 'job-tg01-ready' ? dispatchJob : undefined),
         workflow_id: workflowId || undefined,
-        stage: card?.stage || 'control-plane',
+        stage,
         status: 'failed',
         level: 'error',
         source: 'control-plane',
         message: `無法讀取 ${card?.label || key} LOG：${message}`,
         detail: workflowId ? `workflow_id=${workflowId}` : `job_id=${dispatchJob}`,
       });
-      setLifecycleQuery({ key, loading: false, logs: [], error: true, message: `LOG query failed: ${message}` });
+      setLifecycleQuery({
+        key,
+        stage,
+        loading: false,
+        logs: [],
+        scope: workflowId ? 'workflow' : 'job',
+        queryCommand: workflowId ? `/workflow ${workflowId}` : `/result ${dispatchJob}`,
+        error: true,
+        offline: true,
+        offlineMessage: message,
+        message: 'LOG API OFFLINE',
+      });
+    }
+  };
+
+  const activateLogButton = (event: ReactKeyboardEvent<HTMLButtonElement>, key: LifecycleKey, stage: string) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      void queryLifecycle(key, stage);
     }
   };
 
@@ -827,12 +919,12 @@ export default function Home() {
           <p>loop 會依序通過 GPT → AGY → Claude，最後回報完成度與 GitHub 報告；每個階段都能看見目前進度。</p>
         </div>
         <div className="pipeline" aria-label="Telegram、Controller、GPT、AGY、Claude 到回報完成度的任務流程">
-          <div className={`pipeline-node telegram ${getPipelineNodeState(workflowState, 'telegram')}`}><span className="node-index">01</span><span className="node-icon">TG</span><strong>Telegram</strong><small>你的入口</small><button className="pipeline-log-query" onClick={() => void queryLifecycle('queued')} type="button">查詢 LOG</button></div><Arrow />
-          <div className={`pipeline-node controller ${getPipelineNodeState(workflowState, 'controller')}`}><span className="node-index">02</span><span className="node-icon">◈</span><strong>Controller</strong><small>權限 · queue · job_id</small><button className="pipeline-log-query" onClick={() => void queryLifecycle('queued')} type="button">查詢 LOG</button></div><Arrow />
-          <div className={`pipeline-node codex ${getPipelineNodeState(workflowState, 'gpt')}`}><span className="node-index">03</span><span className="node-icon">CX</span><strong>GPT / Codex</strong><small>repo · code · tests</small><button className="pipeline-log-query" onClick={() => void queryLifecycle('running')} type="button">查詢 LOG</button></div><Arrow />
-          <div className={`pipeline-node agy ${getPipelineNodeState(workflowState, 'agy')}`}><span className="node-index">04</span><span className="node-icon">AG</span><strong>AGY</strong><small>review · verify</small><button className="pipeline-log-query" onClick={() => void queryLifecycle('agy')} type="button">查詢 LOG</button></div><Arrow />
-          <div className={`pipeline-node claude ${getPipelineNodeState(workflowState, 'claude')}`}><span className="node-index">05</span><span className="node-icon">CL</span><strong>Claude</strong><small>final · refine</small><button className="pipeline-log-query" onClick={() => void queryLifecycle('claude')} type="button">查詢 LOG</button></div><Arrow />
-          <div className={`pipeline-node report ${getPipelineNodeState(workflowState, 'report')}`}><span className="node-index">06</span><span className="node-icon">↺</span><strong>回報完成度</strong><small>{workflowId ? `${getWorkflowCompletion(workflowState)}% · summary · GitHub` : 'summary · diff · status'}</small><button className="pipeline-log-query" onClick={() => void queryLifecycle('succeeded')} type="button">查詢 LOG</button></div>
+          <div className={`pipeline-node telegram ${getPipelineNodeState(workflowState, 'telegram')}`}><span className="node-index">01</span><span className="node-icon">TG</span><strong>Telegram</strong><small>你的入口</small><button className="pipeline-log-query" aria-label="查詢 Telegram LOG" aria-controls="log-drawer" aria-expanded={lifecycleQuery?.stage === 'telegram'} onClick={() => void queryLifecycle('queued', 'telegram')} onKeyDown={(event) => activateLogButton(event, 'queued', 'telegram')} type="button">查詢 LOG</button></div><Arrow />
+          <div className={`pipeline-node controller ${getPipelineNodeState(workflowState, 'controller')}`}><span className="node-index">02</span><span className="node-icon">◈</span><strong>Controller</strong><small>權限 · queue · job_id</small><button className="pipeline-log-query" aria-label="查詢 Controller LOG" aria-controls="log-drawer" aria-expanded={lifecycleQuery?.stage === 'controller'} onClick={() => void queryLifecycle('queued', 'controller')} onKeyDown={(event) => activateLogButton(event, 'queued', 'controller')} type="button">查詢 LOG</button></div><Arrow />
+          <div className={`pipeline-node codex ${getPipelineNodeState(workflowState, 'gpt')}`}><span className="node-index">03</span><span className="node-icon">CX</span><strong>GPT / Codex</strong><small>repo · code · tests</small><button className="pipeline-log-query" aria-label="查詢 GPT Codex LOG" aria-controls="log-drawer" aria-expanded={lifecycleQuery?.stage === 'gpt'} onClick={() => void queryLifecycle('running', 'gpt')} onKeyDown={(event) => activateLogButton(event, 'running', 'gpt')} type="button">查詢 LOG</button></div><Arrow />
+          <div className={`pipeline-node agy ${getPipelineNodeState(workflowState, 'agy')}`}><span className="node-index">04</span><span className="node-icon">AG</span><strong>AGY</strong><small>review · verify</small><button className="pipeline-log-query" aria-label="查詢 AGY LOG" aria-controls="log-drawer" aria-expanded={lifecycleQuery?.stage === 'agy'} onClick={() => void queryLifecycle('agy', 'agy')} onKeyDown={(event) => activateLogButton(event, 'agy', 'agy')} type="button">查詢 LOG</button></div><Arrow />
+          <div className={`pipeline-node claude ${getPipelineNodeState(workflowState, 'claude')}`}><span className="node-index">05</span><span className="node-icon">CL</span><strong>Claude</strong><small>final · refine</small><button className="pipeline-log-query" aria-label="查詢 Claude LOG" aria-controls="log-drawer" aria-expanded={lifecycleQuery?.stage === 'claude'} onClick={() => void queryLifecycle('claude', 'claude')} onKeyDown={(event) => activateLogButton(event, 'claude', 'claude')} type="button">查詢 LOG</button></div><Arrow />
+          <div className={`pipeline-node report ${getPipelineNodeState(workflowState, 'report')}`}><span className="node-index">06</span><span className="node-icon">↺</span><strong>回報完成度</strong><small>{workflowId ? `${getWorkflowCompletion(workflowState)}% · summary · GitHub` : 'summary · diff · status'}</small><button className="pipeline-log-query" aria-label="查詢回報完成度 LOG" aria-controls="log-drawer" aria-expanded={lifecycleQuery?.stage === 'report'} onClick={() => void queryLifecycle('succeeded', 'report')} onKeyDown={(event) => activateLogButton(event, 'succeeded', 'report')} type="button">查詢 LOG</button></div>
         </div>
         <div className="architecture-caption"><span className="caption-line" /><span>One source of truth</span><span className="caption-line caption-line-short" /><span className="muted-caption">所有狀態都能被查詢、取消、回看</span></div>
       </section>
@@ -849,32 +941,40 @@ export default function Home() {
               <div className="card-signal" aria-hidden="true"><span /><span /><span /><span /><span /></div>
               <h3>{item.title}</h3>
               <p>{item.detail}</p>
-              <div className="card-foot"><code>{item.stage}.log</code><button className="lifecycle-query-button" onClick={() => void queryLifecycle(item.key)} type="button">查詢 LOG <span>↗</span></button></div>
+              <div className="card-foot"><code>{item.stage}.log</code><button className="lifecycle-query-button" aria-label={`查詢 ${item.label} LOG`} aria-controls="log-drawer" aria-expanded={lifecycleQuery?.stage === item.stage} onClick={() => void queryLifecycle(item.key, item.stage)} onKeyDown={(event) => activateLogButton(event, item.key, item.stage)} type="button">查詢 LOG <span>↗</span></button></div>
             </article>
           ))}
         </div>
-        {lifecycleQuery && <div className={`lifecycle-log-panel ${lifecycleQuery.error ? 'error' : ''}`} role="status" aria-live="polite">
-          <div className="lifecycle-log-head"><div><p className="section-kicker">SQLITE LOG / {lifecycleQuery.key.toUpperCase()}</p><strong>{lifecycleQuery.loading ? '正在讀取 SQLite execution log…' : `查詢結果 · ${lifecycleQuery.scope || '未建立 scope'}`}</strong></div><button className="lifecycle-log-close" onClick={() => setLifecycleQuery(null)} type="button">關閉 ×</button></div>
-          {lifecycleQuery.message && <div className="lifecycle-log-message">{lifecycleQuery.message}</div>}
-          <div className="execution-log-list">
-            {lifecycleQuery.logs.map((log) => <article className={`execution-log-entry status-${log.status}`} key={log.id}>
-              <button className="execution-log-summary" onClick={() => setExpandedLogId((current) => current === log.id ? null : log.id)} type="button" aria-expanded={expandedLogId === log.id}>
-                <span className="execution-log-status" data-level={log.level}>{log.status}</span>
-                <span className="execution-log-time">{formatLogTime(log.created_at)}</span>
-                <span className="execution-log-stage">{log.stage}</span>
-                <span className="execution-log-source">{log.source}</span>
-                <span className="execution-log-message">{log.message}</span>
-                <span className="execution-log-toggle" aria-hidden="true">{expandedLogId === log.id ? '−' : '+'}</span>
-              </button>
-              {expandedLogId === log.id && <div className="execution-log-detail">
-                <code>time={log.created_at}</code>
-                <code>stage={log.stage} status={log.status} level={log.level} source={log.source}</code>
-                <code>job_id={log.job_id || 'null'} workflow_id={log.workflow_id || 'null'}</code>
-                <p>{log.message}</p>
-                {log.detail && <pre>{log.detail}</pre>}
-              </div>}
-            </article>)}
-          </div>
+        {lifecycleQuery && <div className="log-drawer-layer">
+          <button className="log-drawer-backdrop" aria-label="關閉 LOG drawer" onClick={() => setLifecycleQuery(null)} type="button" />
+          <aside className={`log-drawer ${lifecycleQuery.error ? 'error' : ''}`} id="log-drawer" role="dialog" aria-modal="true" aria-labelledby="log-drawer-title">
+            <div className="lifecycle-log-head"><div><p className="section-kicker">SQLITE LOG / {lifecycleQuery.stage.toUpperCase()}</p><strong id="log-drawer-title">{lifecycleQuery.loading ? '正在讀取 SQLite execution log…' : `查詢結果 · ${lifecycleQuery.scope || '未建立 scope'}`}</strong></div><button className="lifecycle-log-close" aria-label="關閉 LOG drawer" ref={logCloseButtonRef} onClick={() => setLifecycleQuery(null)} type="button">關閉 ×</button></div>
+            {lifecycleQuery.offline ? <div className="log-offline" role="alert">
+              <strong>LOG API OFFLINE</strong>
+              <code>{lifecycleQuery.offlineMessage || 'Failed to fetch'}</code>
+              <code>{lifecycleQuery.scope === 'workflow' ? `workflow_id=${workflowId}` : `job_id=${dispatchJob}`}</code>
+              <div className="log-offline-actions"><button onClick={() => void queryLifecycle(lifecycleQuery.key, lifecycleQuery.stage)} type="button">重試</button><button onClick={() => void copyLogQuery()} type="button">{copiedLogQuery ? '已複製查詢命令' : '複製查詢命令'}</button></div>
+            </div> : lifecycleQuery.message && <div className="lifecycle-log-message">{lifecycleQuery.message}</div>}
+            <div className="execution-log-list">
+              {lifecycleQuery.logs.map((log) => <article className={`execution-log-entry status-${log.status}`} key={log.id}>
+                <button className="execution-log-summary" onClick={() => setExpandedLogId((current) => current === log.id ? null : log.id)} type="button" aria-expanded={expandedLogId === log.id}>
+                  <span className="execution-log-status" data-level={log.level}>{log.status}</span>
+                  <span className="execution-log-time">{formatLogTime(log.created_at)}</span>
+                  <span className="execution-log-stage">{log.stage}</span>
+                  <span className="execution-log-source">{log.source}</span>
+                  <span className="execution-log-message">{log.message}</span>
+                  <span className="execution-log-toggle" aria-hidden="true">{expandedLogId === log.id ? '−' : '+'}</span>
+                </button>
+                {expandedLogId === log.id && <div className="execution-log-detail">
+                  <code>created_at={log.created_at}</code>
+                  <code>stage={log.stage} status={log.status} level={log.level} source={log.source}</code>
+                  <code>job_id={log.job_id || 'null'} workflow_id={log.workflow_id || 'null'}</code>
+                  <p>{log.message}</p>
+                  {log.detail && <pre>{log.detail}</pre>}
+                </div>}
+              </article>)}
+            </div>
+          </aside>
         </div>}
       </section>
 
