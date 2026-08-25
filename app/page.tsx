@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 
 const command = '/run 修正 Telegram worker 的 timeout lock cleanup，完成後執行 pytest，不要 push。';
+const MAX_TASK_LENGTH = 12000;
 const defaultWorkflowId = 'flow-abfbbaa69b6247dc';
 
 type LifecycleKey = 'queued' | 'running' | 'succeeded' | 'failed' | 'agy' | 'claude';
@@ -575,6 +576,12 @@ export default function Home() {
   const submitTask = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!taskText.trim()) return;
+    if (taskText.length > MAX_TASK_LENGTH) {
+      setDispatchState('blocked');
+      setDispatchCode('TASK_INVALID');
+      setDispatchSummary(`任務不可超過 ${MAX_TASK_LENGTH.toLocaleString()} 字元。`);
+      return;
+    }
     const token = pollingToken.current + 1;
     pollingToken.current = token;
     setWorkflowId('');
@@ -818,8 +825,8 @@ export default function Home() {
           <div className="console-top"><span className="console-label"><b /> TG 01 / COMMAND CONSOLE</span><span className={`console-mode ${dispatchMode}`}>{dispatchMode === 'test' ? 'TEST MODE' : 'LIVE MODE'}</span></div>
           <form onSubmit={submitTask}>
             <label className="console-label-text" htmlFor="tg-task">COMMAND PAYLOAD <span>/{dispatchFlow === 'loop' ? 'gpt' : 'run'}</span></label>
-            <div className="task-field"><span>/{dispatchFlow === 'loop' ? 'gpt' : 'run'}</span><textarea id="tg-task" value={taskText} onChange={(event) => { setTaskText(event.target.value); setDispatchState('idle'); setWorkflowId(''); setWorkflowState(null); setErrorCopied(false); setDispatchCode(''); }} rows={4} aria-describedby="tg-task-help" /></div>
-            <p className="console-help" id="tg-task-help">{dispatchFlow === 'loop' ? <>依序排程 <strong>Codex → AGY → Claude</strong>，完成後上傳 redacted GitHub Markdown 報告。</> : <>會送往預設 provider <strong>codex</strong>，並保留 workspace-write / no-push 邊界。</>}</p>
+            <div className="task-field"><span>/{dispatchFlow === 'loop' ? 'gpt' : 'run'}</span><textarea id="tg-task" value={taskText} maxLength={MAX_TASK_LENGTH} onChange={(event) => { setTaskText(event.target.value); setDispatchState('idle'); setWorkflowId(''); setWorkflowState(null); setErrorCopied(false); setDispatchCode(''); }} rows={4} aria-describedby="tg-task-help" /></div>
+            <p className="console-help" id="tg-task-help">{dispatchFlow === 'loop' ? <>依序排程 <strong>Codex → AGY → Claude</strong>，完成後上傳 redacted GitHub Markdown 報告。 </> : <>會送往預設 provider <strong>codex</strong>，並保留 workspace-write / no-push 邊界。 </>}<span className="task-counter" aria-live="polite">{taskText.length.toLocaleString()} / {MAX_TASK_LENGTH.toLocaleString()} 字元</span></p>
             <div className="console-controls">
               <div className="flow-switch mode-switch" aria-label="工作流程">
                 <button className={dispatchFlow === 'single' ? 'selected' : ''} onClick={() => setDispatchFlow('single')} type="button">單一 /run</button>
