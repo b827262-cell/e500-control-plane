@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 
 const command = '/run 修正 Telegram worker 的 timeout lock cleanup，完成後執行 pytest，不要 push。';
 const MAX_TASK_LENGTH = 12000;
@@ -155,6 +155,27 @@ type ExecutionLogRecord = {
 type WorkflowLightState = 'green' | 'progress' | 'red' | 'off';
 type WorkflowStage = 'gpt' | 'agy' | 'claude';
 type WebsiteView = 'frontend' | 'backend';
+type SyncStatus = 'idle' | 'checking' | 'syncing' | 'success' | 'error' | 'local-only';
+ 
+ const syncButtonLabels: Record<SyncStatus, string> = {
+   idle: '同步鍵',
+   checking: '同步鍵',
+   syncing: '同步中',
+   success: '已同步',
+   error: '同步失敗',
+   'local-only': '本機限定',
+ };
+
+function subscribeToLocation(callback: () => void) {
+  window.addEventListener('popstate', callback);
+  return () => window.removeEventListener('popstate', callback);
+}
+
+function getIsLocalhost(): boolean {
+  if (typeof window === 'undefined') return true;
+  const host = window.location.hostname;
+  return host === 'localhost' || host === '127.0.0.1';
+}
 
 const workflowStages: Array<{ key: WorkflowStage; label: string }> = [
   { key: 'gpt', label: 'GPT / CODEX' },
@@ -304,8 +325,15 @@ export default function Home() {
   const [copiedLogQuery, setCopiedLogQuery] = useState(false);
   const [bridgeHealth, setBridgeHealth] = useState<BridgeHealthState>('checking');
   const [websiteView, setWebsiteView] = useState<WebsiteView>('frontend');
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle');
+  const [syncResultMsg, setSyncResultMsg] = useState<string>('同步本機網站至 GitHub 與 Sites');
+  const isLocalhost = useSyncExternalStore(subscribeToLocation, getIsLocalhost, () => true);
   const pollingToken = useRef(0);
   const logCloseButtonRef = useRef<HTMLButtonElement>(null);
+  const syncResetTimer = useRef<number | null>(null);
+
+  const effectiveSyncStatus: SyncStatus = !isLocalhost ? 'local-only' : syncStatus;
+  const effectiveSyncMsg: string = !isLocalhost ? '僅支援本機執行 (127.0.0.1 / localhost)' : syncResultMsg;
 
   const bridgeLabel = bridgeHealth === 'connected'
     ? 'API linked'
@@ -392,6 +420,93 @@ export default function Home() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!isLocalhost) return;
+
+    let active = true;
+
+    fetch('http://127.0.0.1:4319/status', { cache: 'no-store' })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        return response.json() as Promise<{ ok?: boolean; busy?: boolean; status?: string }>;
+      })
+      .then((data) => {
+        if (!active) return;
+        if (data.ok && (data.busy || data.status === 'busy')) {
+          setSyncStatus('syncing');
+          setSyncResultMsg('同步服務正在執行中');
+        } else {
+          setSyncStatus('idle');
+          setSyncResultMsg('同步服務已就緒 (點擊同步)');
+        }
+      })
+      .catch((error) => {
+        if (!active) return;
+        // If helper unavailable on localhost, keep button enabled enough to retry or show 同步失敗 after click; do not crash.
+        setSyncStatus('idle');
+        setSyncResultMsg(`同步服務未連線 (${clientSafeErrorMessage(error)})，點擊可重試`);
+      });
+
+    return () => {
+      active = false;
+      if (syncResetTimer.current) {
+        window.clearTimeout(syncResetTimer.current);
+      }
+    };
+  }, [isLocalhost]);
+
+  const handleSync = async () => {
+    if (!isLocalhost || effectiveSyncStatus === 'syncing' || effectiveSyncStatus === 'local-only') {
+      return;
+    }
+    if (syncResetTimer.current) {
+      window.clearTimeout(syncResetTimer.current);
+      syncResetTimer.current = null;
+    }
+    setSyncStatus('syncing');
+    setSyncResultMsg('正在同步本機網站至 GitHub 與 Sites...');
+    try {
+      // POST /sync with no body and no arbitrary input
+      const response = await fetch('http://127.0.0.1:4319/sync', {
+        method: 'POST',
+      });
+      const payload = await response.json().catch(() => null) as {
+        ok?: boolean;
+        status?: string;
+        error?: string;
+        output?: string;
+      } | null;
+
+      if (response.ok && payload && (payload.ok || payload.status === 'success')) {
+        setSyncStatus('success');
+        setSyncResultMsg('已同步成功');
+        syncResetTimer.current = window.setTimeout(() => {
+          setSyncStatus('idle');
+          setSyncResultMsg('同步服務已就緒 (點擊同步)');
+        }, 3000);
+      } else {
+        const errorDetail = payload?.error || (payload?.output ? payload.output.trim().split('\n').pop() : `HTTP ${response.status}`);
+        const safeErr = clientSafeErrorMessage(errorDetail || '同步失敗');
+        setSyncStatus('error');
+        setSyncResultMsg(`同步失敗: ${safeErr}`);
+        syncResetTimer.current = window.setTimeout(() => {
+          setSyncStatus('idle');
+          setSyncResultMsg('同步服務已就緒 (點擊可重試)');
+        }, 4000);
+      }
+    } catch (error) {
+      const safeErr = clientSafeErrorMessage(error);
+      setSyncStatus('error');
+      setSyncResultMsg(`同步失敗: ${safeErr}`);
+      syncResetTimer.current = window.setTimeout(() => {
+        setSyncStatus('idle');
+        setSyncResultMsg('同步服務未連線，點擊可重試');
+      }, 4000);
+    }
+  };
 
   useEffect(() => {
     if (!lifecycleQuery) return;
@@ -799,9 +914,25 @@ export default function Home() {
           <a href="#commands">指令</a>
           <a href="#safety">安全閘</a>
         </nav>
-        <a className="topbar-link" href="https://github.com/b827262-cell/Telegram-ai-code" target="_blank" rel="noreferrer">
-          GitHub <span>↗</span>
-        </a>
+        <div className="topbar-actions">
+          <button
+            type="button"
+            className={`topbar-sync-button ${effectiveSyncStatus}`}
+            onClick={handleSync}
+            disabled={effectiveSyncStatus === 'local-only' || effectiveSyncStatus === 'syncing'}
+            title={effectiveSyncMsg}
+            aria-label={`網站同步 (${syncButtonLabels[effectiveSyncStatus]})`}
+          >
+            <span className="sync-indicator" aria-hidden="true" />
+            <span>{syncButtonLabels[effectiveSyncStatus]}</span>
+          </button>
+          <span className="sr-only" aria-live="polite" role="status">
+            {effectiveSyncMsg}
+          </span>
+          <a className="topbar-link" href="https://github.com/b827262-cell/Telegram-ai-code" target="_blank" rel="noreferrer">
+            GitHub <span>↗</span>
+          </a>
+        </div>
       </header>
 
       <section className="hero section-wrap" id="top">
