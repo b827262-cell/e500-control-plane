@@ -68,6 +68,7 @@ const lifecycle: Array<{ key: LifecycleKey; number: string; label: string; title
 const commands = [
   ['/ping', 'Bot / worker 健康檢查'],
   ['/run <task>', '預設送往 Codex'],
+  ['/gpt-smoke <task>', 'Codex → AGY → Claude；不寫入 GitHub（live smoke 預設）'],
   ['/gpt <task>', 'Codex → AGY → Claude → GitHub 報告'],
   ['/agy <task>', '排入 AGY review queue'],
   ['/claude <task>', '排入 Claude final queue'],
@@ -289,6 +290,7 @@ export default function Home() {
   const [errorCopied, setErrorCopied] = useState(false);
   const [dispatchMode, setDispatchMode] = useState<'test' | 'live'>('test');
   const [dispatchFlow, setDispatchFlow] = useState<'single' | 'loop'>('loop');
+  const [noExternalWrite, setNoExternalWrite] = useState(true);
   const [taskText, setTaskText] = useState('');
   const [dispatchState, setDispatchState] = useState<DispatchState>('idle');
   const [dispatchJob, setDispatchJob] = useState('job-tg01-ready');
@@ -635,7 +637,14 @@ export default function Home() {
         const response = await fetch(endpoint, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ task: taskText, mode: 'write', provider: 'codex' }),
+          body: JSON.stringify({
+            task: taskText,
+            mode: 'write',
+            provider: 'codex',
+            // This is intentionally explicit: native bridge persistence, not
+            // the UI, enforces the final no-external-write policy.
+            noExternalWrite: dispatchFlow === 'loop' && noExternalWrite,
+          }),
         });
         const payload = await response.json() as {
           ok?: boolean;
@@ -783,7 +792,7 @@ export default function Home() {
           <span>E500 <em>/</em> CONTROL PLANE</span>
         </a>
         <nav className="nav-links" aria-label="主要導覽">
-          <a href="#tg-command">TG 01</a>
+          <a href="#tg-command">程設</a>
           <a href="#websites">網站</a>
           <a href="#architecture">架構</a>
           <a href="#lifecycle">生命週期</a>
@@ -798,7 +807,7 @@ export default function Home() {
       <section className="hero section-wrap" id="top">
         <div className="hero-copy">
           <div className="eyebrow"><span className="status-dot" /> TG-CODEX-CONTROL-001 <span className="eyebrow-rule" /> PHASE 01</div>
-          <h1>Telegram 管理任務，<br /><span>Codex 專注交付。</span></h1>
+          <h1>Telegram Task<br /><span>Codex Antigravity Claude</span></h1>
           <p className="hero-lede">把 Telegram 做成 control plane，而不是另一個 IDE。你只需要下指令；job lifecycle、repo context、測試與 Git safety 交給 Codex。</p>
           <div className="hero-actions">
             <a className="button button-primary" href="#lifecycle">查看任務生命週期 <span>↓</span></a>
@@ -849,7 +858,7 @@ export default function Home() {
           <form onSubmit={submitTask}>
             <label className="console-label-text" htmlFor="tg-task">COMMAND PAYLOAD <span>/{dispatchFlow === 'loop' ? 'gpt' : 'run'}</span></label>
             <div className="task-field"><span>/{dispatchFlow === 'loop' ? 'gpt' : 'run'}</span><textarea id="tg-task" value={taskText} maxLength={MAX_TASK_LENGTH} onChange={(event) => { setTaskText(event.target.value); setDispatchState('idle'); setWorkflowId(''); setWorkflowState(null); setErrorCopied(false); setDispatchCode(''); }} rows={4} aria-describedby="tg-task-help" /></div>
-            <p className="console-help" id="tg-task-help">{dispatchFlow === 'loop' ? <>依序排程 <strong>Codex → AGY → Claude</strong>，完成後上傳 redacted GitHub Markdown 報告。 </> : <>會送往預設 provider <strong>codex</strong>，並保留 workspace-write / no-push 邊界。 </>}<span className="task-counter" aria-live="polite">{taskText.length.toLocaleString()} / {MAX_TASK_LENGTH.toLocaleString()} 字元</span></p>
+            <p className="console-help" id="tg-task-help">{dispatchFlow === 'loop' ? <>依序排程 <strong>Codex → AGY → Claude</strong>；live smoke 預設不寫入 GitHub，可明確關閉此安全模式以保留正常報告。 </> : <>會送往預設 provider <strong>codex</strong>，並保留 workspace-write / no-push 邊界。 </>}<span className="task-counter" aria-live="polite">{taskText.length.toLocaleString()} / {MAX_TASK_LENGTH.toLocaleString()} 字元</span></p>
             <div className="console-controls">
               <div className="flow-switch mode-switch" aria-label="工作流程">
                 <button className={dispatchFlow === 'single' ? 'selected' : ''} onClick={() => setDispatchFlow('single')} type="button">單一 /run</button>
@@ -859,6 +868,7 @@ export default function Home() {
                 <button className={dispatchMode === 'test' ? 'selected' : ''} onClick={() => setDispatchMode('test')} type="button">測試佇列</button>
                 <button className={dispatchMode === 'live' ? 'selected live' : ''} onClick={() => setDispatchMode('live')} type="button">實際派送</button>
               </div>
+              {dispatchFlow === 'loop' && <label className="console-label-text"><input checked={noExternalWrite} onChange={(event) => setNoExternalWrite(event.target.checked)} type="checkbox" /> 無外部寫入（smoke）</label>}
               <button className="send-button" disabled={dispatchState === 'checking'} type="submit">{dispatchMode === 'test' ? '送出測試命令' : '實際派送'} <span>↗</span></button>
             </div>
           </form>

@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { buildBridgeWorkflowRequest } from '@/app/lib/bridge-workflow-request';
 import { coerceLogStatus, writeExecutionLogOnceBestEffort } from '@/app/lib/execution-logs';
 import { buildWorkflowDetail, projectWorkflow, type WorkflowReport, type WorkflowSnapshot } from '@/app/lib/workflow-chain';
 
@@ -34,7 +35,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const body = await request.json() as { task?: unknown; mode?: unknown };
+    const body = await request.json() as { task?: unknown; mode?: unknown; noExternalWrite?: unknown };
     const task = typeof body.task === 'string' ? body.task.trim() : '';
     if (!task || task.length > 12000) {
       await writeExecutionLogOnceBestEffort({
@@ -50,18 +51,25 @@ export async function POST(request: Request) {
       );
     }
 
+    let bridgeRequest: ReturnType<typeof buildBridgeWorkflowRequest>;
+    try {
+      bridgeRequest = buildBridgeWorkflowRequest({
+        task,
+        mode: body.mode,
+        allowedUserId,
+        noExternalWrite: body.noExternalWrite,
+      });
+    } catch {
+      return NextResponse.json({ ok: false, code: 'NO_EXTERNAL_WRITE_INVALID' }, { status: 400 });
+    }
+
     const response = await fetch(`${bridgeUrl}/workflow`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${bridgeToken}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({
-        task,
-        mode: body.mode ?? 'write',
-        userId: allowedUserId,
-        chatId: allowedUserId,
-      }),
+      body: JSON.stringify(bridgeRequest),
       cache: 'no-store',
     });
     const payload = await response.json() as BridgeWorkflowResponse;
