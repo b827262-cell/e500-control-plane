@@ -281,29 +281,36 @@ function formatLogTime(value: string): string {
   return Number.isNaN(timestamp.getTime()) ? value : timestamp.toLocaleString('zh-TW', { hour12: false });
 }
 
-async function copyTextToClipboard(value: string): Promise<boolean> {
+export async function copyTextToClipboard(value: string): Promise<boolean> {
   try {
-    if (navigator.clipboard?.writeText) {
+    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
       await navigator.clipboard.writeText(value);
       return true;
     }
   } catch {
-    // Fall through to the compatibility path for embedded/mobile browsers.
+    // Fall through to the compatibility path for non-secure context / embedded / mobile browsers.
   }
   try {
-    const textarea = document.createElement('textarea');
-    textarea.value = value;
-    textarea.setAttribute('readonly', '');
-    textarea.style.position = 'fixed';
-    textarea.style.opacity = '0';
-    document.body.appendChild(textarea);
-    textarea.select();
-    const copied = document.execCommand('copy');
-    textarea.remove();
-    return copied;
+    if (typeof document !== 'undefined' && typeof document.createElement === 'function') {
+      const textarea = document.createElement('textarea');
+      textarea.value = value;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      textarea.style.top = '-9999px';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      textarea.setSelectionRange(0, textarea.value.length);
+      const copied = typeof document.execCommand === 'function' ? document.execCommand('copy') : false;
+      textarea.remove();
+      return copied;
+    }
   } catch {
     return false;
   }
+  return false;
 }
 
 export default function Home() {

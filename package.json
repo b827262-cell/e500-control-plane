@@ -10,7 +10,7 @@
     "build": "vinext build",
     "start": "vinext start",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
-    "test": "node --experimental-strip-types --test tests/bridge-health.test.ts",
+    "test": "node --experimental-strip-types --test tests/bridge-health.test.ts test/*.test.ts",
     "test:bridge": "node --experimental-strip-types --test tests/bridge-health.test.ts"
   },
   "dependencies": {

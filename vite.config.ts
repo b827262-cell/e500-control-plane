@@ -1,8 +1,10 @@
 import { sites } from '@openai/sites-vite-plugin';
 import tailwindcss from '@tailwindcss/postcss';
 import vinext from 'vinext';
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
 import hostingConfig from './.openai/hosting.json';
+import originConfig from './origin-config.json';
+import { isValidBareHost } from './app/lib/metadata-origin';
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
   '00000000-0000-4000-8000-000000000000';
@@ -34,7 +36,7 @@ const localBindingConfig = {
     : [],
 };
 
-export default defineConfig(async () => {
+export default defineConfig(async ({ mode }) => {
   // Keep Wrangler and Miniflare state project-local. These are non-secret tool
   // settings; application environment belongs in ignored `.env*` files.
   process.env.WRANGLER_WRITE_LOGS ??= 'false';
@@ -44,11 +46,17 @@ export default defineConfig(async () => {
   // Wrangler snapshots its log path while the Cloudflare plugin is imported.
   const { cloudflare } = await import('@cloudflare/vite-plugin');
 
+  const env = loadEnv(mode, process.cwd(), '');
+  const tailscaleHostCandidate = (env.E500_TAILSCALE_HOST || originConfig.tailscaleHost).trim();
+  const tailscaleHost = isValidBareHost(tailscaleHostCandidate) ? tailscaleHostCandidate : undefined;
+
   return {
     css: { postcss: { plugins: [tailwindcss()] } },
-    server: isCodexSeatbeltSandbox
-      ? { watch: { useFsEvents: false, usePolling: true } }
-      : undefined,
+    server: {
+      host: '0.0.0.0',
+      allowedHosts: ['terminal.local', ...(tailscaleHost ? [tailscaleHost] : [])],
+      ...(isCodexSeatbeltSandbox ? { watch: { useFsEvents: false, usePolling: true } } : {}),
+    },
     plugins: [
       vinext(),
       sites(),

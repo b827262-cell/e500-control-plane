@@ -1,0 +1,11 @@
+{
+  "canonicalOrigin": null,
+  "metadataAllowedHosts": [
+    "localhost",
+    "127.0.0.1",
+    "terminal.local",
+    "100.76.46.86",
+    "b827262-e500-g9-ws760t.tailc359df.ts.net"
+  ],
+  "tailscaleHost": "b827262-e500-g9-ws760t.tailc359df.ts.net"
+}
