@@ -156,15 +156,15 @@ type WorkflowLightState = 'green' | 'progress' | 'red' | 'off';
 type WorkflowStage = 'gpt' | 'agy' | 'claude';
 type WebsiteView = 'frontend' | 'backend';
 type SyncStatus = 'idle' | 'checking' | 'syncing' | 'success' | 'error' | 'local-only';
- 
- const syncButtonLabels: Record<SyncStatus, string> = {
-   idle: '同步鍵',
-   checking: '同步鍵',
-   syncing: '同步中',
-   success: '已同步',
-   error: '同步失敗',
-   'local-only': '本機限定',
- };
+
+const syncButtonLabels: Record<SyncStatus, string> = {
+  idle: '同步鍵',
+  checking: '同步鍵',
+  syncing: '同步中',
+  success: '已同步',
+  error: '同步失敗',
+  'local-only': '本機限定',
+};
 
 function subscribeToLocation(callback: () => void) {
   window.addEventListener('popstate', callback);
