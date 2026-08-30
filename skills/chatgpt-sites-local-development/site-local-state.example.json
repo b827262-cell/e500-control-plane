@@ -1,0 +1,13 @@
+{
+  "site_name": "example-site",
+  "site_project_id": "appgprj_xxx",
+  "site_url": "https://example.chatgpt.site/",
+  "local_root": "/home/user/project/example-site",
+  "github_repo": "owner/example-site",
+  "dev_port": 3000,
+  "canonical_mode": "local",
+  "sites_base_version": null,
+  "sites_base_source_sha": null,
+  "sites_base_tree_sha": null,
+  "github_baseline_sha": null
+}

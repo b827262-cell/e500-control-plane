@@ -122,6 +122,97 @@ E500 local edit
 → production verification
 ```
 
+## ChatGPT Sites → 本機開發 → Site 更新
+
+本 repository 也包含一個可重複用於「新網站」的通用 Skill：
+
+```text
+skills/chatgpt-sites-local-development/SKILL.md
+skills/chatgpt-sites-local-development/site-local-state.example.json
+```
+
+這個流程採 **Site-first，之後 Local-first**：第一次先在 ChatGPT Sites 快速完成網站初稿；Save 一個可識別的 Sites Version 後，把該版本的完整 source tree 下載到本機。完成本機 build / preview 驗證與 GitHub 初始化後，從此由本機 checkout 成為日後主要開發來源。
+
+第一次建立網站：
+
+```text
+ChatGPT 設計 Site 初稿
+→ Save Sites Version
+→ 下載該 saved version 的完整 source tree
+→ 建立本機開發 checkout
+→ npm install / build / local preview
+→ 初始化 Git / GitHub
+→ 記錄 Sites project / saved version / source SHA / local root / GitHub repo
+→ 本機正式成為 canonical development source
+```
+
+之後日常更新：
+
+```text
+本機修改
+→ localhost 預覽與測試
+→ 同步鍵
+→ GitHub
+→ 讀取目前 Sites latest saved tree
+→ 與最新 GitHub target tree 做完整 full-tree diff
+→ 產生動態 handoff
+→ Save 新 Sites Version
+→ 獨立審查
+→ Deploy exact saved version
+→ 驗證 chatgpt.site 正式內容
+```
+
+### 為什麼 handoff 必須動態計算
+
+不要把 Sites 更新固定成「永遠只同步某幾個檔案」。每次都必須比較 **目前 Sites saved tree** 與 **最新 GitHub target tree**，由實際差異決定這次需要 3、7、15 或更多 paths。只有在套用後的完整 tree 與 target tree 完全一致時，才允許 Save 新 Sites Version。
+
+核心 gate：
+
+```text
+APPLIED_SITES_TREE == GITHUB_TARGET_TREE
+```
+
+如果不相等，必須 fail closed，不得 Save 半成品。
+
+### 新網站需要的參數
+
+每個新網站只需建立自己的 state/config，至少記錄：
+
+```text
+SITE_NAME
+SITE_PROJECT_ID
+SITE_URL
+LOCAL_ROOT
+GITHUB_REPO
+DEV_PORT
+LATEST_SAVED_VERSION
+LATEST_SAVED_SOURCE_SHA
+LATEST_DEPLOYED_VERSION
+```
+
+可從 `site-local-state.example.json` 複製成專案自己的設定檔，再填入實際值。不要把 token、cookie、Sites credential 或任何密鑰寫入 state、Git 或 README。
+
+### 建議固定操作語意
+
+- `SITE BOOTSTRAP`：從 ChatGPT Sites 已保存初稿建立本機開發環境與 GitHub。
+- `SITE STATUS`：只讀檢查 local / GitHub / Sites saved / deployed 狀態。
+- `SITE SYNC`：本機驗證後同步到 GitHub；沒有變更時必須安全 no-op。
+- `SITE SAVE`：用 latest saved Sites tree 與 GitHub target tree 算完整差異，驗證 exact tree 後 Save 新 Sites Version。
+- `SITE DEPLOY`：只部署明確指定、已驗證的 saved version。
+
+整個模型可簡化為：
+
+```text
+第一次：ChatGPT Site 初稿 → 下載本機 → 建 GitHub
+之後：本機修改 → 同步 → Save → 審查 → Deploy
+```
+
+但仍需保持這個安全不變式：
+
+```text
+LOCAL EDIT ≠ GITHUB SYNC ≠ SITES SAVE ≠ PRODUCTION DEPLOY
+```
+
 ## 安全規則
 
 - 不自動 force-push
