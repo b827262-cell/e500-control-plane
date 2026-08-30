@@ -156,7 +156,6 @@ type WorkflowLightState = 'green' | 'progress' | 'red' | 'off';
 type WorkflowStage = 'gpt' | 'agy' | 'claude';
 type WebsiteView = 'frontend' | 'backend';
 type SyncStatus = 'idle' | 'checking' | 'syncing' | 'success' | 'error' | 'local-only';
-type SitesSaveStatus = 'idle' | 'checking' | 'applying' | 'verifying' | 'saving' | 'success' | 'blocked' | 'error' | 'local-only';
 
 const syncButtonLabels: Record<SyncStatus, string> = {
   idle: '同步鍵',
@@ -164,18 +163,6 @@ const syncButtonLabels: Record<SyncStatus, string> = {
   syncing: '同步中',
   success: '已同步',
   error: '同步失敗',
-  'local-only': '本機限定',
-};
-
-const sitesSaveButtonLabels: Record<SitesSaveStatus, string> = {
-  idle: 'Sites 儲存',
-  checking: 'Sites 檢查中…',
-  applying: 'Sites Apply 中…',
-  verifying: 'Sites 驗證中…',
-  saving: 'Sites 儲存中…',
-  success: '已儲存',
-  blocked: 'BLOCKED',
-  error: '儲存失敗',
   'local-only': '本機限定',
 };
 
@@ -346,23 +333,14 @@ export default function Home() {
   const [bridgeHealth, setBridgeHealth] = useState<BridgeHealthState>('checking');
   const [websiteView, setWebsiteView] = useState<WebsiteView>('frontend');
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle');
-  const [syncResultMsg, setSyncResultMsg] = useState<string>('同步本機網站至 GitHub 與 Sites');
-  const [sitesSaveStatus, setSitesSaveStatus] = useState<SitesSaveStatus>('idle');
-  const [sitesSaveResultMsg, setSitesSaveResultMsg] = useState<string>('Sites 儲存尚未執行；不會正式部署。');
-  const [sitesSaveVersion, setSitesSaveVersion] = useState<number | null>(null);
+  const [syncResultMsg, setSyncResultMsg] = useState<string>('同步本機網站至 GitHub，並產生 Sites handoff');
   const isLocalhost = useSyncExternalStore(subscribeToLocation, getIsLocalhost, () => true);
   const pollingToken = useRef(0);
   const logCloseButtonRef = useRef<HTMLButtonElement>(null);
   const syncResetTimer = useRef<number | null>(null);
-  const sitesSaveResetTimer = useRef<number | null>(null);
 
   const effectiveSyncStatus: SyncStatus = !isLocalhost ? 'local-only' : syncStatus;
   const effectiveSyncMsg: string = !isLocalhost ? '僅支援本機執行 (127.0.0.1 / localhost)' : syncResultMsg;
-  const effectiveSitesSaveStatus: SitesSaveStatus = !isLocalhost ? 'local-only' : sitesSaveStatus;
-  const effectiveSitesSaveMsg: string = !isLocalhost ? '僅支援本機執行 (127.0.0.1 / localhost)' : sitesSaveResultMsg;
-  const effectiveSitesSaveLabel = effectiveSitesSaveStatus === 'success' && sitesSaveVersion !== null
-    ? `已儲存 V${sitesSaveVersion}`
-    : sitesSaveButtonLabels[effectiveSitesSaveStatus];
 
   const bridgeLabel = bridgeHealth === 'connected'
     ? 'API linked'
@@ -484,37 +462,7 @@ export default function Home() {
       if (syncResetTimer.current) {
         window.clearTimeout(syncResetTimer.current);
       }
-      if (sitesSaveResetTimer.current) {
-        window.clearTimeout(sitesSaveResetTimer.current);
-      }
     };
-  }, [isLocalhost]);
-
-  useEffect(() => {
-    if (!isLocalhost) return;
-    let active = true;
-    fetch('http://127.0.0.1:4319/sites-status', { cache: 'no-store' })
-      .then((response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json() as Promise<{ ok?: boolean; busy?: boolean; sites_save?: { capability?: string; reason?: string; detail?: string } }>;
-      })
-      .then((data) => {
-        if (!active) return;
-        if (data.ok && data.busy) {
-          setSitesSaveStatus('checking');
-          setSitesSaveResultMsg('Sites 儲存服務正在執行中');
-          return;
-        }
-        const reason = typeof data.sites_save?.reason === 'string' ? data.sites_save.reason : 'SITES_CAPABILITY_NOT_CONFIGURED';
-        setSitesSaveStatus('idle');
-        setSitesSaveResultMsg(`Sites 儲存已就緒；${clientSafeErrorMessage(reason)} 時會安全停止，不會部署。`);
-      })
-      .catch((error) => {
-        if (!active) return;
-        setSitesSaveStatus('error');
-        setSitesSaveResultMsg(`Sites 儲存服務未連線 (${clientSafeErrorMessage(error)})`);
-      });
-    return () => { active = false; };
   }, [isLocalhost]);
 
   const handleSync = async () => {
@@ -526,7 +474,7 @@ export default function Home() {
       syncResetTimer.current = null;
     }
     setSyncStatus('syncing');
-    setSyncResultMsg('正在同步本機網站至 GitHub 與 Sites...');
+    setSyncResultMsg('正在同步本機網站至 GitHub，並產生 Sites handoff...');
     try {
       // POST /sync with no body and no arbitrary input
       const response = await fetch('http://127.0.0.1:4319/sync', {
@@ -564,39 +512,6 @@ export default function Home() {
         setSyncStatus('idle');
         setSyncResultMsg('同步服務未連線，點擊可重試');
       }, 4000);
-    }
-  };
-
-  const handleSitesSave = async () => {
-    if (!isLocalhost || ['checking', 'applying', 'verifying', 'saving', 'local-only'].includes(effectiveSitesSaveStatus)) return;
-    if (sitesSaveResetTimer.current) {
-      window.clearTimeout(sitesSaveResetTimer.current);
-      sitesSaveResetTimer.current = null;
-    }
-    setSitesSaveVersion(null);
-    setSitesSaveStatus('checking');
-    setSitesSaveResultMsg('正在驗證 Sites 最新已儲存 SHA 與七路徑 handoff…');
-    try {
-      const response = await fetch('http://127.0.0.1:4319/sites-save', { method: 'POST' });
-      const payload = await response.json().catch(() => null) as {
-        ok?: boolean; status?: string; reason?: string; detail?: string; version_number?: number; source_sha?: string; diagnostics?: { summary?: string };
-      } | null;
-      if (response.ok && payload?.ok && payload.status === 'saved' && typeof payload.version_number === 'number' && typeof payload.source_sha === 'string') {
-        setSitesSaveStatus('success');
-        setSitesSaveVersion(payload.version_number);
-        setSitesSaveResultMsg(`已儲存 V${payload.version_number}；來源 ${clientSafeErrorMessage(payload.source_sha)}。未執行正式部署。`);
-        return;
-      }
-      const reason = typeof payload?.reason === 'string' ? payload.reason.match(/^[A-Z][A-Z0-9_]{0,199}$/)?.[0] : '';
-      const detail = typeof payload?.detail === 'string' ? payload.detail : '';
-      const summary = typeof payload?.diagnostics?.summary === 'string' ? payload.diagnostics.summary : '';
-      const safeDetail = clientSafeErrorMessage(detail || summary || reason || `HTTP ${response.status}`);
-      const blocked = payload?.status === 'blocked' || response.status === 503;
-      setSitesSaveStatus(blocked ? 'blocked' : 'error');
-      setSitesSaveResultMsg(`${blocked ? 'BLOCKED' : '儲存失敗'}: ${safeDetail}`);
-    } catch (error) {
-      setSitesSaveStatus('error');
-      setSitesSaveResultMsg(`儲存失敗: ${clientSafeErrorMessage(error)}`);
     }
   };
 
@@ -1018,22 +933,11 @@ export default function Home() {
             <span className="sync-indicator" aria-hidden="true" />
             <span>{syncButtonLabels[effectiveSyncStatus]}</span>
           </button>
-          <button
-            type="button"
-            className={`topbar-sync-button sites-save-button ${effectiveSitesSaveStatus}`}
-            onClick={handleSitesSave}
-            disabled={['checking', 'applying', 'verifying', 'saving', 'local-only'].includes(effectiveSitesSaveStatus)}
-            title={effectiveSitesSaveMsg}
-            aria-label={`Sites 儲存 (${effectiveSitesSaveLabel})`}
-          >
-            <span className="sync-indicator" aria-hidden="true" />
-            <span>{effectiveSitesSaveLabel}</span>
-          </button>
-          <span className="sr-only" aria-live="polite" role="status">
-            {effectiveSyncMsg}
+          <span className="topbar-link" title="在 ChatGPT/Sites 使用 E500 更新 userscript；本頁不會直接寫入 Sites">
+            Sites：userscript
           </span>
           <span className="sr-only" aria-live="polite" role="status">
-            {effectiveSitesSaveMsg}
+            {effectiveSyncMsg}
           </span>
           <a className="topbar-link" href="https://github.com/b827262-cell/Telegram-ai-code" target="_blank" rel="noreferrer">
             GitHub <span>↗</span>
